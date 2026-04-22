@@ -1,0 +1,13 @@
+﻿{
+  "should_build": true,
+  "torch_version": "2.7.0",
+  "previous_version": "",
+  "release_tag": "torch-2.7.0",
+  "release_reason": "initial-release",
+  "resolved": {
+    "version": "2.7.0",
+    "tag": "v2.7.0",
+    "tag_commit_sha": "",
+    "release_url": ""
+  }
+}

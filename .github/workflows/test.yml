@@ -1,0 +1,104 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Resolve latest stable PyTorch version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/resolve_latest_torch.py --output resolved.json
+          cat resolved.json
+
+      - name: Validate resolved version shape
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("resolved.json").read_text(encoding="utf-8"))
+          assert "version" in payload, "missing 'version' field"
+          assert "tag" in payload, "missing 'tag' field"
+          version = payload["version"]
+          parts = version.split(".")
+          assert len(parts) >= 2, f"version has too few parts: {version}"
+          assert all(p.isdigit() for p in parts), f"non-numeric version parts: {version}"
+          print(f"Resolved PyTorch version: {version}")
+
+  script-smoke:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Compile Python scripts
+        run: python -m compileall scripts
+
+      - name: Smoke test script CLIs
+        run: |
+          python scripts/resolve_latest_torch.py --help
+          python scripts/plan_release.py --help
+          python scripts/update_release_state.py --help
+          python scripts/validate_wheel.py --help
+
+  plan-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Resolve latest PyTorch version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/resolve_latest_torch.py --output resolved.json
+
+      - name: Run plan against current state
+        run: |
+          python scripts/plan_release.py \
+            --resolved-file resolved.json \
+            --state-file release-state/latest.json > plan.json
+          cat plan.json
+
+      - name: Validate plan output shape
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+
+          plan = json.loads(Path("plan.json").read_text(encoding="utf-8"))
+          assert "should_build" in plan, "missing should_build"
+          assert "torch_version" in plan, "missing torch_version"
+          assert "release_tag" in plan, "missing release_tag"
+          assert "release_reason" in plan, "missing release_reason"
+          assert isinstance(plan["should_build"], bool), "should_build must be bool"
+          print(
+              f"Plan: should_build={plan['should_build']}, "
+              f"version={plan['torch_version']}, "
+              f"reason={plan['release_reason']}"
+          )

@@ -1,0 +1,611 @@
+name: Build PyTorch Wheels
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Force build even if latest release already has the same version."
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      torch_version_override:
+        description: "Optional PyTorch version to build (e.g. 2.7.0). Overrides upstream resolution."
+        required: false
+        default: ""
+        type: string
+      target_os_filter:
+        description: "Optional target OS filter."
+        required: false
+        default: "any"
+        type: choice
+        options:
+          - any
+          - linux
+          - windows
+          - macos
+      target_arch_filter:
+        description: "Optional target architecture filter."
+        required: false
+        default: "any"
+        type: choice
+        options:
+          - any
+          - x86_64
+          - arm64
+      backend_filter:
+        description: "Optional backend filter."
+        required: false
+        default: "any"
+        type: choice
+        options:
+          - any
+          - cpu
+          - cuda
+          - mps
+      python_version_filter:
+        description: "Optional Python version filter (e.g. 3.13)."
+        required: false
+        default: ""
+        type: string
+      release_tag:
+        description: "Optional release tag override (e.g. torch-2.7.0). If set, creates a GitHub release."
+        required: false
+        type: string
+  schedule:
+    - cron: "30 3 * * 1"  # Every Monday at 3:30 AM UTC
+
+permissions:
+  contents: read
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.plan.outputs.should_build }}
+      torch_version: ${{ steps.plan.outputs.torch_version }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      release_plan_json: ${{ steps.plan.outputs.release_plan_json }}
+      matrix: ${{ steps.make-matrix.outputs.matrix }}
+      matrix_has_entries: ${{ steps.make-matrix.outputs.matrix_has_entries }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - id: resolve
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TORCH_VERSION_OVERRIDE: ${{ github.event.inputs.torch_version_override || '' }}
+        run: |
+          set -euo pipefail
+          EXTRA_ARGS=()
+          if [ -n "${TORCH_VERSION_OVERRIDE}" ]; then
+            EXTRA_ARGS+=(--version-override "${TORCH_VERSION_OVERRIDE}")
+          fi
+          python scripts/resolve_latest_torch.py \
+            --output resolved.json \
+            "${EXTRA_ARGS[@]}"
+          cat resolved.json
+
+      - id: plan
+        env:
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild || 'false' }}
+          RELEASE_TAG_INPUT: ${{ github.event.inputs.release_tag || '' }}
+        run: |
+          set -euo pipefail
+
+          PLAN_ARGS=()
+          if [ "${FORCE_REBUILD}" = "true" ]; then
+            PLAN_ARGS+=(--force)
+          fi
+          if [ -n "${RELEASE_TAG_INPUT}" ]; then
+            PLAN_ARGS+=(--release-tag "${RELEASE_TAG_INPUT}")
+          fi
+
+          python scripts/plan_release.py \
+            --resolved-file resolved.json \
+            --state-file release-state/latest.json \
+            "${PLAN_ARGS[@]}" > release-plan.json
+
+          cat release-plan.json
+          echo "should_build=$(jq -r '.should_build' release-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "torch_version=$(jq -r '.torch_version' release-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$(jq -r '.release_tag' release-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "release_plan_json=$(jq -c . release-plan.json)" >> "$GITHUB_OUTPUT"
+
+      - id: make-matrix
+        env:
+          TARGET_OS_FILTER: ${{ github.event.inputs.target_os_filter || 'any' }}
+          TARGET_ARCH_FILTER: ${{ github.event.inputs.target_arch_filter || 'any' }}
+          BACKEND_FILTER: ${{ github.event.inputs.backend_filter || 'any' }}
+          PYTHON_VERSION_FILTER: ${{ github.event.inputs.python_version_filter || '' }}
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          matrix_config = json.loads(Path("config/build_matrix.json").read_text(encoding="utf-8"))
+          plan = json.loads(Path("release-plan.json").read_text(encoding="utf-8"))
+
+          torch_version = plan["torch_version"]
+          python_versions = matrix_config["python_versions"]
+          targets = matrix_config["targets"]
+
+          target_os_filter = os.environ.get("TARGET_OS_FILTER", "any").strip().lower() or "any"
+          target_arch_filter = os.environ.get("TARGET_ARCH_FILTER", "any").strip().lower() or "any"
+          backend_filter = os.environ.get("BACKEND_FILTER", "any").strip().lower() or "any"
+          python_version_filter = os.environ.get("PYTHON_VERSION_FILTER", "").strip()
+
+          valid_os = {"any", "linux", "windows", "macos"}
+          valid_arch = {"any", "x86_64", "arm64"}
+          valid_backends = {"any", "cpu", "cuda", "mps"}
+          if target_os_filter not in valid_os:
+              raise SystemExit(f"Invalid target_os_filter: {target_os_filter}")
+          if target_arch_filter not in valid_arch:
+              raise SystemExit(f"Invalid target_arch_filter: {target_arch_filter}")
+          if backend_filter not in valid_backends:
+              raise SystemExit(f"Invalid backend_filter: {backend_filter}")
+
+          include = []
+          for target in targets:
+              if target_os_filter != "any" and target["target_os"] != target_os_filter:
+                  continue
+              if target_arch_filter != "any" and target["target_arch"] != target_arch_filter:
+                  continue
+              if backend_filter != "any" and target.get("backend", "cpu") != backend_filter:
+                  continue
+              for py_version in python_versions:
+                  if python_version_filter and py_version != python_version_filter:
+                      continue
+                  py_nodot = py_version.replace(".", "")
+                  backend = target.get("backend", "cpu")
+                  artifact_name = (
+                      f"torch-{torch_version}-py{py_nodot}"
+                      f"-{target['target_os']}-{target['target_arch']}-{backend}"
+                  )
+                  include.append(
+                      {
+                          "torch_version": torch_version,
+                          "python_version": py_version,
+                          "artifact_name": artifact_name,
+                          **target,
+                      }
+                  )
+
+          if targets and not include:
+              raise SystemExit(
+                  "Selected filters produced an empty build matrix. "
+                  "Check target_os_filter/target_arch_filter/backend_filter/python_version_filter values."
+              )
+
+          matrix = {"include": include}
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"matrix={json.dumps(matrix)}\n")
+              fh.write(f"matrix_has_entries={'true' if include else 'false'}\n")
+
+  validate-scripts:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Verify Python scripts compile
+        run: python -m compileall scripts
+
+      - name: Smoke test script CLIs
+        run: |
+          python scripts/resolve_latest_torch.py --help
+          python scripts/plan_release.py --help
+          python scripts/update_release_state.py --help
+          python scripts/validate_wheel.py --help
+
+  build:
+    needs: [check-upstream, validate-scripts]
+    if: needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.matrix_has_entries == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.check-upstream.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: Free disk space (Linux)
+        if: matrix.target_os == 'linux'
+        run: |
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          df -h
+
+      - name: Install build dependencies (Linux)
+        if: matrix.target_os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build build-essential \
+            libopenblas-dev libomp-dev
+
+      - name: Install build dependencies (macOS)
+        if: matrix.target_os == 'macos'
+        run: |
+          brew update
+          brew install cmake ninja libomp
+
+      - name: Install build dependencies (Windows)
+        if: matrix.target_os == 'windows'
+        shell: pwsh
+        run: |
+          choco install cmake ninja -y
+          echo "C:\Program Files\CMake\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
+
+      - name: Set up MSVC (Windows)
+        if: matrix.target_os == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install CUDA Toolkit
+        if: matrix.backend == 'cuda'
+        uses: Jimver/cuda-toolkit@v0.2.29
+        with:
+          cuda: '12.4.1'
+          method: 'network'
+
+      - name: Discover CUDA home (Linux CUDA)
+        if: matrix.backend == 'cuda' && matrix.target_os == 'linux'
+        id: cuda_home
+        shell: bash
+        run: |
+          set -euo pipefail
+          cuda_root=""
+          for candidate in "${CUDA_PATH:-}" "${CUDA_HOME:-}"; do
+            if [ -n "$candidate" ] && [ -d "$candidate" ]; then
+              cuda_root="$candidate"
+              break
+            fi
+          done
+          if [ -z "$cuda_root" ] && command -v nvcc >/dev/null 2>&1; then
+            cuda_root="$(cd "$(dirname "$(command -v nvcc)")/.."; pwd)"
+          fi
+          if [ -z "$cuda_root" ]; then
+            for candidate in /usr/local/cuda /usr/local/cuda-* /opt/cuda; do
+              if [ -d "$candidate" ]; then cuda_root="$candidate"; break; fi
+            done
+          fi
+          if [ -z "$cuda_root" ]; then
+            echo "Could not determine CUDA root" >&2; exit 1
+          fi
+          echo "cuda_root=$cuda_root" >> "$GITHUB_OUTPUT"
+          echo "Using CUDA root: $cuda_root"
+
+      - name: Clone PyTorch source
+        shell: bash
+        run: |
+          git clone \
+            --branch "v${{ matrix.torch_version }}" \
+            --depth 1 \
+            https://github.com/pytorch/pytorch \
+            pytorch-src
+
+      - name: Initialize submodules
+        shell: bash
+        working-directory: pytorch-src
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth 1 --jobs 4
+
+      - name: Install PyTorch build requirements
+        shell: bash
+        working-directory: pytorch-src
+        run: |
+          python -m pip install --upgrade pip
+          pip install cmake ninja
+          pip install -r requirements.txt
+
+      - name: Build wheel (Linux CPU)
+        if: matrix.target_os == 'linux' && matrix.backend == 'cpu'
+        working-directory: pytorch-src
+        env:
+          USE_CUDA: "0"
+          USE_ROCM: "0"
+          USE_MKLDNN: "1"
+          USE_NUMPY: "1"
+          BUILD_TEST: "0"
+          MAX_JOBS: "4"
+        run: python setup.py bdist_wheel
+
+      - name: Build wheel (Linux CUDA)
+        if: matrix.target_os == 'linux' && matrix.backend == 'cuda'
+        working-directory: pytorch-src
+        env:
+          USE_CUDA: "1"
+          USE_ROCM: "0"
+          USE_MKLDNN: "1"
+          USE_NUMPY: "1"
+          BUILD_TEST: "0"
+          MAX_JOBS: "4"
+          CUDA_HOME: ${{ steps.cuda_home.outputs.cuda_root }}
+          TORCH_CUDA_ARCH_LIST: "6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0"
+        run: python setup.py bdist_wheel
+
+      - name: Build wheel (macOS arm64 MPS)
+        if: matrix.target_os == 'macos' && matrix.target_arch == 'arm64'
+        working-directory: pytorch-src
+        env:
+          USE_CUDA: "0"
+          USE_ROCM: "0"
+          USE_MKLDNN: "0"
+          USE_MPS: "1"
+          USE_NUMPY: "1"
+          BUILD_TEST: "0"
+          MAX_JOBS: "4"
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          CMAKE_OSX_ARCHITECTURES: "arm64"
+        run: python setup.py bdist_wheel
+
+      - name: Build wheel (macOS x86_64 CPU)
+        if: matrix.target_os == 'macos' && matrix.target_arch == 'x86_64'
+        working-directory: pytorch-src
+        env:
+          USE_CUDA: "0"
+          USE_ROCM: "0"
+          USE_MKLDNN: "0"
+          USE_NUMPY: "1"
+          BUILD_TEST: "0"
+          MAX_JOBS: "4"
+          MACOSX_DEPLOYMENT_TARGET: "10.15"
+          CMAKE_OSX_ARCHITECTURES: "x86_64"
+        run: python setup.py bdist_wheel
+
+      - name: Build wheel (Windows CPU)
+        if: matrix.target_os == 'windows' && matrix.backend == 'cpu'
+        working-directory: pytorch-src
+        shell: pwsh
+        env:
+          USE_CUDA: "0"
+          USE_ROCM: "0"
+          USE_NUMPY: "1"
+          BUILD_TEST: "0"
+          MAX_JOBS: "4"
+          CMAKE_GENERATOR: "Ninja"
+        run: python setup.py bdist_wheel
+
+      - name: Build wheel (Windows CUDA)
+        if: matrix.target_os == 'windows' && matrix.backend == 'cuda'
+        working-directory: pytorch-src
+        shell: pwsh
+        env:
+          USE_CUDA: "1"
+          USE_ROCM: "0"
+          USE_NUMPY: "1"
+          BUILD_TEST: "0"
+          MAX_JOBS: "4"
+          CMAKE_GENERATOR: "Ninja"
+          TORCH_CUDA_ARCH_LIST: "6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0"
+        run: python setup.py bdist_wheel
+
+      - name: Collect built wheel
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp pytorch-src/dist/*.whl dist/
+          echo "Built wheels:"
+          ls -lh dist/
+
+      - name: Smoke test wheel (Linux / macOS)
+        if: matrix.target_os != 'windows'
+        env:
+          BUILD_BACKEND: ${{ matrix.backend }}
+        shell: bash
+        run: |
+          WHEEL=$(ls dist/*.whl | head -1)
+          pip install --force-reinstall "$WHEEL"
+          python -c "
+          import os, torch
+          print(f'torch version: {torch.__version__}')
+          t = torch.ones(2, 2)
+          assert t.sum().item() == 4.0, 'tensor sum check failed'
+          linear = torch.nn.Linear(4, 4)
+          out = linear(t)
+          print(f'nn.Linear output shape: {out.shape}')
+          backend = os.environ.get('BUILD_BACKEND', 'cpu')
+          if backend == 'cuda':
+              assert torch.version.cuda is not None, 'Expected CUDA build but torch.version.cuda is None'
+              print(f'CUDA compiled version: {torch.version.cuda}')
+          elif backend == 'mps':
+              print(f'MPS built-in: {hasattr(torch.backends, \"mps\")}')
+          print('smoke-ok')
+          "
+
+      - name: Smoke test wheel (Windows)
+        if: matrix.target_os == 'windows'
+        env:
+          BUILD_BACKEND: ${{ matrix.backend }}
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem -Path dist -Filter *.whl | Select-Object -First 1
+          if (-not $wheel) { throw "No wheel found in dist/" }
+          pip install --force-reinstall $wheel.FullName
+          $backend = $env:BUILD_BACKEND
+          python -c "
+          import os, torch
+          print(f'torch version: {torch.__version__}')
+          t = torch.ones(2,2)
+          assert t.sum().item() == 4.0
+          backend = os.environ.get('BUILD_BACKEND', 'cpu')
+          if backend == 'cuda':
+              assert torch.version.cuda is not None, 'Expected CUDA build but torch.version.cuda is None'
+              print(f'CUDA compiled version: {torch.version.cuda}')
+          print('smoke-ok')
+          "
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  validate-artifacts:
+    needs: [check-upstream, build]
+    if: needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.matrix_has_entries == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.check-upstream.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Download built wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist-artifact
+
+      - name: Validate wheel structure
+        shell: bash
+        run: |
+          WHEEL=$(ls dist-artifact/*.whl | head -1)
+          python scripts/validate_wheel.py "$WHEEL" \
+            --expected-version "${{ matrix.torch_version }}"
+
+  release:
+    if: needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.matrix_has_entries == 'true'
+    needs: [check-upstream, validate-artifacts]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Restore release plan
+        run: |
+          printf '%s' '${{ needs.check-upstream.outputs.release_plan_json }}' > release-plan.json
+          cat release-plan.json
+
+      - name: Update release state files
+        env:
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python scripts/update_release_state.py \
+            --plan-file release-plan.json \
+            --output-dir release-state \
+            --build-source-commit "${{ github.sha }}" \
+            --workflow-run-id "${{ github.run_id }}" \
+            --workflow-run-url "${GITHUB_RUN_URL}" \
+            --repository "${{ github.repository }}" \
+            --event-name "${{ github.event_name }}"
+
+      - id: commit-state
+        name: Commit release state
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-state
+
+          if git diff --cached --quiet; then
+            echo "release_commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "Record release state for ${{ needs.check-upstream.outputs.release_tag }}"
+          git push origin HEAD:${{ github.ref_name }}
+          echo "release_commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - id: push-tag
+        name: Create and push release tag
+        env:
+          RELEASE_TAG: ${{ needs.check-upstream.outputs.release_tag }}
+          RELEASE_COMMIT_SHA: ${{ steps.commit-state.outputs.release_commit_sha }}
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force --prune --prune-tags
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Tag already exists on origin: ${RELEASE_TAG}"
+            echo "tag_name=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null; then
+            git tag -d "${RELEASE_TAG}"
+          fi
+
+          git tag -a "${RELEASE_TAG}" "${RELEASE_COMMIT_SHA}" -m "Release ${RELEASE_TAG}"
+          git push origin "refs/tags/${RELEASE_TAG}"
+          echo "tag_name=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.push-tag.outputs.tag_name }}
+          name: "PyTorch ${{ needs.check-upstream.outputs.torch_version }} — Source-Built Wheels"
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+          body: |
+            Source-built PyTorch **${{ needs.check-upstream.outputs.torch_version }}** wheels for platforms and Python versions not covered by official PyPI releases.
+
+            ### Platforms & Backends
+            | Platform | Backend |
+            |---|---|
+            | Linux x86\_64 | CPU |
+            | Linux x86\_64 | CUDA 12.4 |
+            | Windows x86\_64 | CPU |
+            | Windows x86\_64 | CUDA 12.4 |
+            | macOS x86\_64 (Intel) | CPU |
+            | macOS arm64 (Apple Silicon) | MPS (Metal) |
+
+            ### Python Versions
+            See attached wheel filenames for the full combination matrix.
+
+            ### Notes
+            - These wheels have the same API surface as official PyPI wheels — `import torch` and all PyTorch code works identically.
+            - CUDA wheels include compiled CUDA kernels. A physical NVIDIA GPU is required at runtime for GPU acceleration.
+            - MPS wheels use Apple Metal for GPU acceleration on Apple Silicon.
+            - Built from the official PyTorch source at tag `v${{ needs.check-upstream.outputs.torch_version }}`.
+          files: release-assets/*

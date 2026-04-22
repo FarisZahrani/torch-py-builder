@@ -1,0 +1,41 @@
+{
+  "python_versions": ["3.13"],
+  "targets": [
+    {
+      "runner": "ubuntu-24.04",
+      "target_os": "linux",
+      "target_arch": "x86_64",
+      "backend": "cpu"
+    },
+    {
+      "runner": "ubuntu-22.04",
+      "target_os": "linux",
+      "target_arch": "x86_64",
+      "backend": "cuda"
+    },
+    {
+      "runner": "windows-2022",
+      "target_os": "windows",
+      "target_arch": "x86_64",
+      "backend": "cpu"
+    },
+    {
+      "runner": "windows-2022",
+      "target_os": "windows",
+      "target_arch": "x86_64",
+      "backend": "cuda"
+    },
+    {
+      "runner": "macos-15-intel",
+      "target_os": "macos",
+      "target_arch": "x86_64",
+      "backend": "cpu"
+    },
+    {
+      "runner": "macos-14",
+      "target_os": "macos",
+      "target_arch": "arm64",
+      "backend": "mps"
+    }
+  ]
+}

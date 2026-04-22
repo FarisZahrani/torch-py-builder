@@ -1,0 +1,8 @@
+build/
+dist/
+pytorch-src/
+*.pyc
+__pycache__/
+.venv/
+*.whl
+.vscode/mcp.json
