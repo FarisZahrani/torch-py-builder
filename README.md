@@ -15,7 +15,7 @@ PyTorch's official PyPI wheels only support a limited set of platform/Python com
 | macOS (Intel)     | x86\_64      | macos-15-intel  |
 | macOS (Apple Silicon) | arm64   | macos-14        |
 
-All builds are CPU-only (no CUDA/ROCm).
+Linux and Windows builds include both CPU and CUDA (12.4) variants. macOS Intel is CPU-only. macOS Apple Silicon uses MPS (Metal Performance Shaders).
 
 ## Configuration
 
