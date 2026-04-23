@@ -17,10 +17,6 @@ PyTorch's official PyPI wheels only support a limited set of platform/Python com
 
 All builds are CPU-only (no CUDA/ROCm).
 
-## Schedule
-
-The build workflow runs **every Monday at 03:30 UTC**. It resolves the latest stable PyTorch release from GitHub and only triggers a full build and release when a new version is detected. Manual dispatch is also available with filters for OS, architecture, Python version, and optional version override.
-
 ## Configuration
 
 ### `config/build_matrix.json`
@@ -40,9 +36,10 @@ Edit this file to add or remove Python versions or platforms.
 
 | Workflow       | Trigger                  | Purpose                                          |
 |----------------|--------------------------|--------------------------------------------------|
-| `build.yml`    | Schedule (weekly) / manual | Resolve latest PyTorch, build & release wheels |
+| `sync.yml`     | Automatic / manual       | Detect new PyTorch release, trigger build        |
+| `build.yml`    | Automatic / manual       | Resolve latest PyTorch, build & release wheels   |
 | `test.yml`     | Push / PR                | Validate scripts and version resolution          |
-| `cleanup.yml`  | Schedule / manual        | Remove old artifacts and workflow runs           |
+| `cleanup.yml`  | Automatic / manual       | Remove old artifacts and workflow runs           |
 
 ## Release State
 
