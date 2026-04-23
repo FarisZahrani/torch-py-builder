@@ -315,6 +315,12 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1 --jobs 4
 
+      - name: Fix script permissions (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: pytorch-src
+        run: find scripts -name "*.sh" -exec chmod +x {} \;
+
       - name: Install PyTorch build requirements
         shell: bash
         working-directory: pytorch-src
@@ -322,6 +328,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install cmake ninja
           pip install -r requirements.txt
+
+      - name: Pin CMake < 4 (Windows CUDA)
+        if: runner.os == 'Windows' && matrix.backend == 'cuda'
+        shell: bash
+        run: pip install "cmake<4"
 
       - name: Build wheel (Linux CPU)
         if: matrix.target_os == 'linux' && matrix.backend == 'cpu'
@@ -426,7 +437,7 @@ jobs:
           print(f'torch version: {torch.__version__}')
           t = torch.ones(2, 2)
           assert t.sum().item() == 4.0, 'tensor sum check failed'
-          linear = torch.nn.Linear(4, 4)
+          linear = torch.nn.Linear(2, 2)
           out = linear(t)
           print(f'nn.Linear output shape: {out.shape}')
           backend = os.environ.get('BUILD_BACKEND', 'cpu')
