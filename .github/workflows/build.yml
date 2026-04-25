@@ -214,7 +214,7 @@ jobs:
     needs: [check-upstream, validate-scripts]
     if: needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.matrix_has_entries == 'true'
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 240
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.check-upstream.outputs.matrix) }}
@@ -355,10 +355,11 @@ jobs:
           USE_ROCM: "0"
           USE_MKLDNN: "1"
           USE_NUMPY: "1"
+          USE_DISTRIBUTED: "0"
           BUILD_TEST: "0"
           MAX_JOBS: "4"
           CUDA_HOME: ${{ steps.cuda_home.outputs.cuda_root }}
-          TORCH_CUDA_ARCH_LIST: "6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0"
+          TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
         run: python setup.py bdist_wheel
 
       - name: Build wheel (macOS arm64 MPS)
@@ -403,6 +404,22 @@ jobs:
           CMAKE_GENERATOR: "Ninja"
         run: python setup.py bdist_wheel
 
+      - name: Trim PATH for Windows CUDA build
+        if: matrix.target_os == 'windows' && matrix.backend == 'cuda'
+        shell: pwsh
+        run: |
+          # ilammy/msvc-dev-cmd already ran vcvars64.bat, adding MSVC paths to PATH.
+          # cmake's CUDA compiler ID test generates a script that calls vcvars64.bat again.
+          # If MSVC paths are still in PATH, the doubled entries push PATH over cmd.exe's
+          # 8191-char limit. Strip MSVC paths now so vcvars64.bat can re-add them cleanly.
+          $trimmed = ($env:PATH -split ';' | Select-Object -Unique | Where-Object {
+            $_ -ne '' -and
+            $_ -notmatch '\\Microsoft Visual Studio\\' -and
+            $_ -notmatch '\\MSBuild\\' -and
+            $_ -notmatch '\\Common7\\'
+          }) -join ';'
+          "PATH=$trimmed" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Build wheel (Windows CUDA)
         if: matrix.target_os == 'windows' && matrix.backend == 'cuda'
         working-directory: pytorch-src
@@ -414,10 +431,7 @@ jobs:
           BUILD_TEST: "0"
           MAX_JOBS: "4"
           CMAKE_GENERATOR: "Ninja"
-          TORCH_CUDA_ARCH_LIST: "6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0"
-          CMAKE_CUDA_COMPILER: "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4/bin/nvcc.exe"
-          CMAKE_CUDA_COMPILER_FORCED: "TRUE"
-          CUDAHOSTCXX: cl
+          TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
         run: python setup.py bdist_wheel
 
       - name: Collect built wheel
