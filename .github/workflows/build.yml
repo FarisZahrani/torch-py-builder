@@ -231,15 +231,6 @@ jobs:
         with:
           python-version: ${{ matrix.python_version }}
 
-      - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Show compiler cache configuration
-        shell: bash
-        run: |
-          echo "sccache path: $SCCACHE_PATH"
-          "$SCCACHE_PATH" --show-stats || true
-
       - name: Free disk space (Linux)
         if: matrix.target_os == 'linux'
         run: |
@@ -270,6 +261,15 @@ jobs:
         run: |
           choco install cmake ninja -y
           echo "C:\Program Files\CMake\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
+
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Show compiler cache configuration
+        shell: bash
+        run: |
+          echo "sccache path: $SCCACHE_PATH"
+          "$SCCACHE_PATH" --show-stats || true
 
       - name: Set up MSVC (Windows)
         if: matrix.target_os == 'windows'
