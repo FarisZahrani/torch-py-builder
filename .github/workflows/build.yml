@@ -214,16 +214,31 @@ jobs:
     needs: [check-upstream, validate-scripts]
     if: needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.matrix_has_entries == 'true'
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.check-upstream.outputs.matrix) }}
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+      USE_RELATIVE_PATHS: "1"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      CMAKE_CUDA_COMPILER_LAUNCHER: sccache
     steps:
       - uses: actions/checkout@v6
 
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python_version }}
+
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Show compiler cache configuration
+        shell: bash
+        run: |
+          echo "sccache path: $SCCACHE_PATH"
+          "$SCCACHE_PATH" --show-stats || true
 
       - name: Free disk space (Linux)
         if: matrix.target_os == 'linux'
@@ -496,9 +511,15 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
 
+      - name: Show compiler cache stats
+        if: always()
+        shell: bash
+        run: |
+          "$SCCACHE_PATH" --show-stats || true
+
   validate-artifacts:
     needs: [check-upstream, build]
-    if: needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.matrix_has_entries == 'true'
+    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.matrix_has_entries == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -510,18 +531,51 @@ jobs:
         with:
           python-version: "3.13"
 
+      - id: artifact-check
+        name: Check wheel artifact presence
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const artifactName = '${{ matrix.artifact_name }}';
+            const artifacts = await github.paginate(
+              github.rest.actions.listWorkflowRunArtifacts,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId,
+                per_page: 100,
+              }
+            );
+            const artifact = artifacts.find((item) => item.name === artifactName);
+            core.setOutput('exists', artifact ? 'true' : 'false');
+            if (artifact) {
+              core.info(`Found artifact ${artifactName}`);
+            } else {
+              core.warning(`Artifact ${artifactName} is missing`);
+            }
+
       - name: Download built wheel
+        if: steps.artifact-check.outputs.exists == 'true'
         uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.artifact_name }}
           path: dist-artifact
 
       - name: Validate wheel structure
+        if: steps.artifact-check.outputs.exists == 'true'
         shell: bash
         run: |
           WHEEL=$(ls dist-artifact/*.whl | head -1)
           python scripts/validate_wheel.py "$WHEEL" \
             --expected-version "${{ matrix.torch_version }}"
+
+      - name: Fail when expected artifact is missing
+        if: steps.artifact-check.outputs.exists != 'true'
+        shell: bash
+        run: |
+          echo "Missing build artifact for ${{ matrix.artifact_name }}."
+          echo "A corresponding build matrix job failed or timed out before upload."
+          exit 1
 
   release:
     if: needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.matrix_has_entries == 'true'
