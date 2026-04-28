@@ -341,7 +341,7 @@ jobs:
         working-directory: pytorch-src
         run: |
           python -m pip install --upgrade pip
-          pip install "cmake<4" ninja
+          pip install "cmake<4" ninja build wheel
           pip install -r requirements.txt
 
       - name: Prepend pip cmake to PATH
@@ -350,7 +350,7 @@ jobs:
           CMAKE_BIN=$(python -c "import cmake, os; print(os.path.join(os.path.dirname(cmake.__file__), 'data', 'bin'))")
           echo "$CMAKE_BIN" >> "$GITHUB_PATH"
 
-      - name: Build wheel (Linux CPU)
+      - name: Build libtorch (Linux CPU)
         if: matrix.target_os == 'linux' && matrix.backend == 'cpu'
         working-directory: pytorch-src
         env:
@@ -360,9 +360,22 @@ jobs:
           USE_NUMPY: "1"
           BUILD_TEST: "0"
           MAX_JOBS: "4"
-        run: python setup.py bdist_wheel
+        run: python tools/build_libtorch.py
 
-      - name: Build wheel (Linux CUDA)
+      - name: Build wheel from libtorch (Linux CPU)
+        if: matrix.target_os == 'linux' && matrix.backend == 'cpu'
+        working-directory: pytorch-src
+        env:
+          USE_CUDA: "0"
+          USE_ROCM: "0"
+          USE_MKLDNN: "1"
+          USE_NUMPY: "1"
+          BUILD_TEST: "0"
+          MAX_JOBS: "4"
+          CMAKE_FRESH: "1"
+        run: python -m build --wheel --no-isolation
+
+      - name: Build libtorch (Linux CUDA)
         if: matrix.target_os == 'linux' && matrix.backend == 'cuda'
         working-directory: pytorch-src
         env:
@@ -375,9 +388,25 @@ jobs:
           MAX_JOBS: "4"
           CUDA_HOME: ${{ steps.cuda_home.outputs.cuda_root }}
           TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
-        run: python setup.py bdist_wheel
+        run: python tools/build_libtorch.py
 
-      - name: Build wheel (macOS arm64 MPS)
+      - name: Build wheel from libtorch (Linux CUDA)
+        if: matrix.target_os == 'linux' && matrix.backend == 'cuda'
+        working-directory: pytorch-src
+        env:
+          USE_CUDA: "1"
+          USE_ROCM: "0"
+          USE_MKLDNN: "1"
+          USE_NUMPY: "1"
+          USE_DISTRIBUTED: "0"
+          BUILD_TEST: "0"
+          MAX_JOBS: "4"
+          CUDA_HOME: ${{ steps.cuda_home.outputs.cuda_root }}
+          TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
+          CMAKE_FRESH: "1"
+        run: python -m build --wheel --no-isolation
+
+      - name: Build libtorch (macOS arm64 MPS)
         if: matrix.target_os == 'macos' && matrix.target_arch == 'arm64'
         working-directory: pytorch-src
         env:
@@ -390,9 +419,25 @@ jobs:
           MAX_JOBS: "4"
           MACOSX_DEPLOYMENT_TARGET: "11.0"
           CMAKE_OSX_ARCHITECTURES: "arm64"
-        run: python setup.py bdist_wheel
+        run: python tools/build_libtorch.py
 
-      - name: Build wheel (macOS x86_64 CPU)
+      - name: Build wheel from libtorch (macOS arm64 MPS)
+        if: matrix.target_os == 'macos' && matrix.target_arch == 'arm64'
+        working-directory: pytorch-src
+        env:
+          USE_CUDA: "0"
+          USE_ROCM: "0"
+          USE_MKLDNN: "0"
+          USE_MPS: "1"
+          USE_NUMPY: "1"
+          BUILD_TEST: "0"
+          MAX_JOBS: "4"
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          CMAKE_OSX_ARCHITECTURES: "arm64"
+          CMAKE_FRESH: "1"
+        run: python -m build --wheel --no-isolation
+
+      - name: Build libtorch (macOS x86_64 CPU)
         if: matrix.target_os == 'macos' && matrix.target_arch == 'x86_64'
         working-directory: pytorch-src
         env:
@@ -404,9 +449,24 @@ jobs:
           MAX_JOBS: "4"
           MACOSX_DEPLOYMENT_TARGET: "10.15"
           CMAKE_OSX_ARCHITECTURES: "x86_64"
-        run: python setup.py bdist_wheel
+        run: python tools/build_libtorch.py
 
-      - name: Build wheel (Windows CPU)
+      - name: Build wheel from libtorch (macOS x86_64 CPU)
+        if: matrix.target_os == 'macos' && matrix.target_arch == 'x86_64'
+        working-directory: pytorch-src
+        env:
+          USE_CUDA: "0"
+          USE_ROCM: "0"
+          USE_MKLDNN: "0"
+          USE_NUMPY: "1"
+          BUILD_TEST: "0"
+          MAX_JOBS: "4"
+          MACOSX_DEPLOYMENT_TARGET: "10.15"
+          CMAKE_OSX_ARCHITECTURES: "x86_64"
+          CMAKE_FRESH: "1"
+        run: python -m build --wheel --no-isolation
+
+      - name: Build libtorch (Windows CPU)
         if: matrix.target_os == 'windows' && matrix.backend == 'cpu'
         working-directory: pytorch-src
         shell: pwsh
@@ -417,7 +477,21 @@ jobs:
           BUILD_TEST: "0"
           MAX_JOBS: "4"
           CMAKE_GENERATOR: "Ninja"
-        run: python setup.py bdist_wheel
+        run: python tools/build_libtorch.py
+
+      - name: Build wheel from libtorch (Windows CPU)
+        if: matrix.target_os == 'windows' && matrix.backend == 'cpu'
+        working-directory: pytorch-src
+        shell: pwsh
+        env:
+          USE_CUDA: "0"
+          USE_ROCM: "0"
+          USE_NUMPY: "1"
+          BUILD_TEST: "0"
+          MAX_JOBS: "4"
+          CMAKE_GENERATOR: "Ninja"
+          CMAKE_FRESH: "1"
+        run: python -m build --wheel --no-isolation
 
       - name: Trim PATH for Windows CUDA build
         if: matrix.target_os == 'windows' && matrix.backend == 'cuda'
@@ -435,7 +509,7 @@ jobs:
           }) -join ';'
           "PATH=$trimmed" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Build wheel (Windows CUDA)
+      - name: Build libtorch (Windows CUDA)
         if: matrix.target_os == 'windows' && matrix.backend == 'cuda'
         working-directory: pytorch-src
         shell: pwsh
@@ -447,7 +521,22 @@ jobs:
           MAX_JOBS: "4"
           CMAKE_GENERATOR: "Ninja"
           TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
-        run: python setup.py bdist_wheel
+        run: python tools/build_libtorch.py
+
+      - name: Build wheel from libtorch (Windows CUDA)
+        if: matrix.target_os == 'windows' && matrix.backend == 'cuda'
+        working-directory: pytorch-src
+        shell: pwsh
+        env:
+          USE_CUDA: "1"
+          USE_ROCM: "0"
+          USE_NUMPY: "1"
+          BUILD_TEST: "0"
+          MAX_JOBS: "4"
+          CMAKE_GENERATOR: "Ninja"
+          TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
+          CMAKE_FRESH: "1"
+        run: python -m build --wheel --no-isolation
 
       - name: Collect built wheel
         shell: bash
@@ -457,7 +546,7 @@ jobs:
           echo "Built wheels:"
           ls -lh dist/
 
-      - name: Smoke test wheel (Linux / macOS)
+      - name: Validate built wheel (Linux / macOS)
         if: matrix.target_os != 'windows'
         env:
           BUILD_BACKEND: ${{ matrix.backend }}
@@ -482,7 +571,7 @@ jobs:
           print('smoke-ok')
           "
 
-      - name: Smoke test wheel (Windows)
+      - name: Validate built wheel (Windows)
         if: matrix.target_os == 'windows'
         env:
           BUILD_BACKEND: ${{ matrix.backend }}
@@ -491,17 +580,21 @@ jobs:
           $wheel = Get-ChildItem -Path dist -Filter *.whl | Select-Object -First 1
           if (-not $wheel) { throw "No wheel found in dist/" }
           pip install --force-reinstall $wheel.FullName
-          $backend = $env:BUILD_BACKEND
           python -c "
-          import os, torch
-          print(f'torch version: {torch.__version__}')
-          t = torch.ones(2,2)
-          assert t.sum().item() == 4.0
-          backend = os.environ.get('BUILD_BACKEND', 'cpu')
-          if backend == 'cuda':
-              assert torch.version.cuda is not None, 'Expected CUDA build but torch.version.cuda is None'
-              print(f'CUDA compiled version: {torch.version.cuda}')
-          print('smoke-ok')
+          import os, traceback
+          try:
+              import torch
+              print(f'torch version: {torch.__version__}')
+              t = torch.ones(2, 2)
+              assert t.sum().item() == 4.0
+              backend = os.environ.get('BUILD_BACKEND', 'cpu')
+              if backend == 'cuda':
+                  assert torch.version.cuda is not None, 'Expected CUDA build but torch.version.cuda is None'
+                  print(f'CUDA compiled version: {torch.version.cuda}')
+              print('smoke-ok')
+          except Exception:
+              traceback.print_exc()
+              raise
           "
 
       - name: Upload wheel artifact
