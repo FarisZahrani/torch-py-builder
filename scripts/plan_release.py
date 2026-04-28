@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan whether a new PyTorch wheel build is needed based on resolved version vs release state."""
+"""Plan whether a new shared torch-family release is needed based on the resolved torch version."""
 from __future__ import annotations
 
 import argparse
@@ -10,7 +10,7 @@ from pathlib import Path
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Plan whether a new PyTorch wheel build and release is needed."
+        description="Plan whether a new shared torch-family build and release is needed."
     )
     parser.add_argument(
         "--resolved-file",

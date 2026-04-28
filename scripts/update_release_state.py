@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write committed release-state snapshots after a successful PyTorch wheel release."""
+"""Write committed release-state snapshots after a successful shared torch-family release."""
 from __future__ import annotations
 
 import argparse
@@ -15,7 +15,7 @@ def safe_snapshot_name(tag: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Write committed release-state snapshots for a torch wheel release."
+        description="Write committed release-state snapshots for a shared torch-family release."
     )
     parser.add_argument("--plan-file", required=True, help="Path to a release plan JSON file.")
     parser.add_argument(

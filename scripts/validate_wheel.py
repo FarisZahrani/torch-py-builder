@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Structural validation of a built PyTorch wheel archive."""
+"""Structural validation of a built Python package wheel archive."""
 from __future__ import annotations
 
 import argparse
@@ -10,12 +10,22 @@ from pathlib import Path
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Validate the structure of a built PyTorch wheel file."
+        description="Validate the structure of a built package wheel file."
     )
     parser.add_argument("wheel", help="Path to the .whl file to validate.")
     parser.add_argument(
+        "--expected-package",
+        default="torch",
+        help="Top-level package directory expected inside the wheel archive.",
+    )
+    parser.add_argument(
         "--expected-version",
-        help="Expected torch version string to verify against the wheel filename.",
+        help="Expected package version string to verify against the wheel filename.",
+    )
+    parser.add_argument(
+        "--min-size-bytes",
+        type=int,
+        help="Optional minimum expected wheel size in bytes.",
     )
     parser.add_argument(
         "--full-timeout-seconds",
@@ -34,8 +44,11 @@ def main() -> None:
         sys.exit(f"Not a .whl file: {wheel_path.name}")
 
     size_bytes = wheel_path.stat().st_size
-    # A minimal CPU-only torch wheel is several hundred MB.
-    if size_bytes < 50_000_000:
+    min_size_bytes = args.min_size_bytes
+    if min_size_bytes is None and args.expected_package == "torch":
+        min_size_bytes = 50_000_000
+
+    if min_size_bytes is not None and size_bytes < min_size_bytes:
         sys.exit(
             f"Wheel is suspiciously small ({size_bytes // 1024 // 1024} MB): {wheel_path.name}"
         )
@@ -46,16 +59,19 @@ def main() -> None:
     with zipfile.ZipFile(wheel_path) as zf:
         names = zf.namelist()
 
-    has_torch_package = any(n.startswith("torch/") for n in names)
-    if not has_torch_package:
-        sys.exit(f"torch/ package directory not found in wheel: {wheel_path.name}")
+    expected_prefix = f"{args.expected_package}/"
+    has_expected_package = any(n.startswith(expected_prefix) for n in names)
+    if not has_expected_package:
+        sys.exit(
+            f"{expected_prefix} package directory not found in wheel: {wheel_path.name}"
+        )
 
     has_metadata = any(n.endswith(".dist-info/METADATA") for n in names)
     if not has_metadata:
         sys.exit(f"dist-info/METADATA not found in wheel: {wheel_path.name}")
 
     print(f"  Files in archive : {len(names)}")
-    print(f"  torch/ present   : yes")
+    print(f"  Package present  : {args.expected_package}")
     print(f"  METADATA present : yes")
 
     if args.expected_version:
