@@ -1,23 +1,18 @@
-name: Build PyTorch CPU and MPS Family Wheels
+name: Build PyTorch CUDA Family Wheels
 
 on:
   workflow_dispatch:
     inputs:
       force_rebuild:
-        description: "Force build even if latest release already has the same version."
+        description: "Force CUDA rebuild even if release assets already exist."
         required: false
         default: "false"
         type: choice
         options:
           - "false"
           - "true"
-      torch_version_override:
-        description: "Optional PyTorch version to build (e.g. 2.7.0). Overrides upstream resolution."
-        required: false
-        default: ""
-        type: string
       target_os_filter:
-        description: "Optional target OS filter."
+        description: "Optional target OS filter for CUDA builds."
         required: false
         default: "any"
         type: choice
@@ -25,7 +20,6 @@ on:
           - any
           - linux
           - windows
-          - macos
       target_arch_filter:
         description: "Optional target architecture filter."
         required: false
@@ -34,32 +28,28 @@ on:
         options:
           - any
           - x86_64
-          - arm64
-      backend_filter:
-        description: "Optional backend filter."
-        required: false
-        default: "any"
-        type: choice
-        options:
-          - any
-          - cpu
-          - cuda
-          - mps
       python_version_filter:
         description: "Optional Python version filter (e.g. 3.13)."
         required: false
         default: ""
         type: string
       release_tag:
-        description: "Optional shared release tag override (e.g. torch-2.7.0) for torch, torchvision, and torchaudio assets. If set, creates a GitHub release."
+        description: "Optional shared release tag override. Defaults to release-state/latest.json."
         required: false
+        default: ""
         type: string
+  workflow_run:
+    workflows:
+      - Build PyTorch CPU and MPS Family Wheels
+    types:
+      - completed
 
 permissions:
   contents: read
 
 jobs:
   check-upstream:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.plan-phase.outputs.should_build }}
@@ -68,12 +58,8 @@ jobs:
       torchaudio_version: ${{ steps.resolve-companions.outputs.torchaudio_version }}
       release_tag: ${{ steps.plan.outputs.release_tag }}
       release_plan_json: ${{ steps.plan.outputs.release_plan_json }}
-      matrix: ${{ steps.make-matrix.outputs.matrix }}
-      matrix_has_entries: ${{ steps.make-matrix.outputs.matrix_has_entries }}
-      cpu_matrix: ${{ steps.plan-phase.outputs.cpu_matrix }}
-      cpu_matrix_has_entries: ${{ steps.plan-phase.outputs.cpu_matrix_has_entries }}
-      cuda_candidate_matrix: ${{ steps.make-matrix.outputs.cuda_candidate_matrix }}
-      cuda_candidate_has_entries: ${{ steps.make-matrix.outputs.cuda_candidate_has_entries }}
+      cuda_matrix: ${{ steps.plan-phase.outputs.cuda_matrix }}
+      cuda_matrix_has_entries: ${{ steps.plan-phase.outputs.cuda_matrix_has_entries }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -83,46 +69,50 @@ jobs:
         with:
           python-version: "3.13"
 
-      - id: resolve
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TORCH_VERSION_OVERRIDE: ${{ github.event.inputs.torch_version_override || '' }}
-        run: |
-          set -euo pipefail
-          EXTRA_ARGS=()
-          if [ -n "${TORCH_VERSION_OVERRIDE}" ]; then
-            EXTRA_ARGS+=(--version-override "${TORCH_VERSION_OVERRIDE}")
-          fi
-          python scripts/resolve_latest_torch.py \
-            --output resolved.json \
-            "${EXTRA_ARGS[@]}"
-          cat resolved.json
-
       - id: plan
+        shell: python
         env:
-          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild || 'false' }}
-          RELEASE_TAG_INPUT: ${{ github.event.inputs.release_tag || '' }}
+          FORCE_REBUILD: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.force_rebuild || 'false') || 'false' }}
+          RELEASE_TAG_INPUT: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.release_tag || '') || '' }}
         run: |
-          set -euo pipefail
+          import json
+          import os
+          from pathlib import Path
 
-          PLAN_ARGS=()
-          if [ "${FORCE_REBUILD}" = "true" ]; then
-            PLAN_ARGS+=(--force)
-          fi
-          if [ -n "${RELEASE_TAG_INPUT}" ]; then
-            PLAN_ARGS+=(--release-tag "${RELEASE_TAG_INPUT}")
-          fi
+          state_path = Path("release-state/latest.json")
+          if not state_path.exists():
+              raise SystemExit(
+                  "release-state/latest.json does not exist. Run the CPU workflow first."
+              )
 
-          python scripts/plan_release.py \
-            --resolved-file resolved.json \
-            --state-file release-state/latest.json \
-            "${PLAN_ARGS[@]}" > release-plan.json
+          state = json.loads(state_path.read_text(encoding="utf-8"))
+          torch_version = state.get("torch_version", "")
+          if not torch_version:
+              raise SystemExit(
+                  "release-state/latest.json is missing torch_version. Run the CPU workflow first."
+              )
 
-          cat release-plan.json
-          echo "should_build=$(jq -r '.should_build' release-plan.json)" >> "$GITHUB_OUTPUT"
-          echo "torch_version=$(jq -r '.torch_version' release-plan.json)" >> "$GITHUB_OUTPUT"
-          echo "release_tag=$(jq -r '.release_tag' release-plan.json)" >> "$GITHUB_OUTPUT"
-          echo "release_plan_json=$(jq -c . release-plan.json)" >> "$GITHUB_OUTPUT"
+          release_tag_input = os.environ.get("RELEASE_TAG_INPUT", "").strip()
+          force_rebuild = os.environ.get("FORCE_REBUILD", "false").lower() == "true"
+          release_tag = release_tag_input or state.get("release_tag") or f"torch-{torch_version}"
+
+          plan = {
+              "should_build": True,
+              "torch_version": torch_version,
+              "previous_version": state.get("previous_version", torch_version),
+              "release_tag": release_tag,
+              "release_reason": "forced" if force_rebuild else "cuda-followup",
+          }
+
+          Path("release-plan.json").write_text(
+              json.dumps(plan, indent=2) + "\n", encoding="utf-8"
+          )
+          print(json.dumps(plan, indent=2))
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"torch_version={torch_version}\n")
+              fh.write(f"release_tag={release_tag}\n")
+              fh.write(f"release_plan_json={json.dumps(plan)}\n")
 
       - id: resolve-companions
         run: |
@@ -138,10 +128,9 @@ jobs:
 
       - id: make-matrix
         env:
-          TARGET_OS_FILTER: ${{ github.event.inputs.target_os_filter || 'any' }}
-          TARGET_ARCH_FILTER: ${{ github.event.inputs.target_arch_filter || 'any' }}
-          BACKEND_FILTER: ${{ github.event.inputs.backend_filter || 'any' }}
-          PYTHON_VERSION_FILTER: ${{ github.event.inputs.python_version_filter || '' }}
+          TARGET_OS_FILTER: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.target_os_filter || 'any') || 'any' }}
+          TARGET_ARCH_FILTER: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.target_arch_filter || 'any') || 'any' }}
+          PYTHON_VERSION_FILTER: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.python_version_filter || '') || '' }}
         shell: python
         run: |
           import json
@@ -160,81 +149,53 @@ jobs:
 
           target_os_filter = os.environ.get("TARGET_OS_FILTER", "any").strip().lower() or "any"
           target_arch_filter = os.environ.get("TARGET_ARCH_FILTER", "any").strip().lower() or "any"
-          backend_filter = os.environ.get("BACKEND_FILTER", "any").strip().lower() or "any"
           python_version_filter = os.environ.get("PYTHON_VERSION_FILTER", "").strip()
 
-          valid_os = {"any", "linux", "windows", "macos"}
-          valid_arch = {"any", "x86_64", "arm64"}
-          valid_backends = {"any", "cpu", "cuda", "mps"}
+          valid_os = {"any", "linux", "windows"}
+          valid_arch = {"any", "x86_64"}
           if target_os_filter not in valid_os:
               raise SystemExit(f"Invalid target_os_filter: {target_os_filter}")
           if target_arch_filter not in valid_arch:
               raise SystemExit(f"Invalid target_arch_filter: {target_arch_filter}")
-          if backend_filter not in valid_backends:
-              raise SystemExit(f"Invalid backend_filter: {backend_filter}")
 
           include = []
           for target in targets:
+              if target.get("backend") != "cuda":
+                  continue
               if target_os_filter != "any" and target["target_os"] != target_os_filter:
                   continue
               if target_arch_filter != "any" and target["target_arch"] != target_arch_filter:
-                  continue
-              if backend_filter != "any" and target.get("backend", "cpu") != backend_filter:
                   continue
               for py_version in python_versions:
                   if python_version_filter and py_version != python_version_filter:
                       continue
                   py_nodot = py_version.replace(".", "")
                   backend = target.get("backend", "cpu")
-                  artifact_name = (
-                      f"torch-{torch_version}-py{py_nodot}"
-                      f"-{target['target_os']}-{target['target_arch']}-{backend}"
-                  )
-                  torchvision_artifact_name = (
-                      f"torchvision-{torchvision_version}-py{py_nodot}"
-                      f"-{target['target_os']}-{target['target_arch']}-{backend}"
-                  )
-                  torchaudio_artifact_name = (
-                      f"torchaudio-{torchaudio_version}-py{py_nodot}"
-                      f"-{target['target_os']}-{target['target_arch']}-{backend}"
-                  )
                   include.append(
                       {
                           "torch_version": torch_version,
                           "torchvision_version": torchvision_version,
                           "torchaudio_version": torchaudio_version,
                           "python_version": py_version,
-                          "artifact_name": artifact_name,
-                          "torchvision_artifact_name": torchvision_artifact_name,
-                          "torchaudio_artifact_name": torchaudio_artifact_name,
+                          "artifact_name": (
+                              f"torch-{torch_version}-py{py_nodot}"
+                              f"-{target['target_os']}-{target['target_arch']}-{backend}"
+                          ),
+                          "torchvision_artifact_name": (
+                              f"torchvision-{torchvision_version}-py{py_nodot}"
+                              f"-{target['target_os']}-{target['target_arch']}-{backend}"
+                          ),
+                          "torchaudio_artifact_name": (
+                              f"torchaudio-{torchaudio_version}-py{py_nodot}"
+                              f"-{target['target_os']}-{target['target_arch']}-{backend}"
+                          ),
                           **target,
                       }
                   )
 
-          if targets and not include:
-              raise SystemExit(
-                  "Selected filters produced an empty build matrix. "
-                  "Check target_os_filter/target_arch_filter/backend_filter/python_version_filter values."
-              )
-
           matrix = {"include": include}
-          cpu_candidate_matrix = {
-              "include": [entry for entry in include if entry.get("backend") != "cuda"]
-          }
-          cuda_candidate_matrix = {
-              "include": [entry for entry in include if entry.get("backend") == "cuda"]
-          }
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write(f"matrix={json.dumps(matrix)}\n")
-              fh.write(f"matrix_has_entries={'true' if include else 'false'}\n")
-              fh.write(f"cpu_candidate_matrix={json.dumps(cpu_candidate_matrix)}\n")
-              fh.write(
-                  f"cpu_candidate_has_entries={'true' if cpu_candidate_matrix['include'] else 'false'}\n"
-              )
-              fh.write(f"cuda_candidate_matrix={json.dumps(cuda_candidate_matrix)}\n")
-              fh.write(
-                  f"cuda_candidate_has_entries={'true' if cuda_candidate_matrix['include'] else 'false'}\n"
-              )
 
       - id: inspect-release-assets
         if: steps.plan.outputs.release_tag != ''
@@ -249,11 +210,9 @@ jobs:
                 tag,
               })
               const assetNames = release.data.assets.map((asset) => asset.name)
-              core.setOutput('exists', 'true')
               core.setOutput('asset_names_json', JSON.stringify(assetNames))
             } catch (error) {
               if (error.status === 404) {
-                core.setOutput('exists', 'false')
                 core.setOutput('asset_names_json', '[]')
                 return
               }
@@ -263,28 +222,22 @@ jobs:
       - id: plan-phase
         shell: python
         env:
-          CPU_CANDIDATE_MATRIX: ${{ steps.make-matrix.outputs.cpu_candidate_matrix }}
-          CUDA_CANDIDATE_MATRIX: ${{ steps.make-matrix.outputs.cuda_candidate_matrix }}
+          CANDIDATE_MATRIX: ${{ steps.make-matrix.outputs.matrix }}
           RELEASE_ASSET_NAMES_JSON: ${{ steps.inspect-release-assets.outputs.asset_names_json }}
+          FORCE_REBUILD: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.force_rebuild || 'false') || 'false' }}
         run: |
           import json
           import os
-          from pathlib import Path
 
-          plan = json.loads(Path("release-plan.json").read_text(encoding="utf-8"))
-          cpu_candidate_matrix = json.loads(
-              os.environ.get("CPU_CANDIDATE_MATRIX") or '{"include": []}'
-          )
-          cuda_candidate_matrix = json.loads(
-              os.environ.get("CUDA_CANDIDATE_MATRIX") or '{"include": []}'
-          )
-          release_asset_names = set(
-              json.loads(os.environ.get("RELEASE_ASSET_NAMES_JSON") or "[]")
-          )
+          candidate_matrix = json.loads(os.environ.get("CANDIDATE_MATRIX") or '{"include": []}')
+          release_asset_names = set(json.loads(os.environ.get("RELEASE_ASSET_NAMES_JSON") or "[]"))
+          force_rebuild = os.environ.get("FORCE_REBUILD", "false").lower() == "true"
 
-          def select_missing_entries(matrix: dict) -> dict:
+          if force_rebuild:
+              cuda_matrix = candidate_matrix
+          else:
               filtered = []
-              for entry in matrix.get("include", []):
+              for entry in candidate_matrix.get("include", []):
                   expected_assets = {
                       entry["artifact_name"],
                       entry["torchvision_artifact_name"],
@@ -292,22 +245,15 @@ jobs:
                   }
                   if not expected_assets.issubset(release_asset_names):
                       filtered.append(entry)
-              return {"include": filtered}
+              cuda_matrix = {"include": filtered}
 
-          if plan.get("release_reason") == "forced":
-              cpu_matrix = cpu_candidate_matrix
-              cuda_missing_now = cuda_candidate_matrix
-          else:
-              cpu_matrix = select_missing_entries(cpu_candidate_matrix)
-              cuda_missing_now = select_missing_entries(cuda_candidate_matrix)
-
-          should_build = bool(cpu_matrix["include"])
+          should_build = bool(cuda_matrix["include"])
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write(f"should_build={'true' if should_build else 'false'}\n")
-              fh.write(f"cpu_matrix={json.dumps(cpu_matrix)}\n")
+              fh.write(f"cuda_matrix={json.dumps(cuda_matrix)}\n")
               fh.write(
-                  f"cpu_matrix_has_entries={'true' if cpu_matrix['include'] else 'false'}\n"
+                  f"cuda_matrix_has_entries={'true' if cuda_matrix['include'] else 'false'}\n"
               )
 
   validate-scripts:
@@ -326,7 +272,6 @@ jobs:
 
       - name: Smoke test script CLIs
         run: |
-          python scripts/resolve_latest_torch.py --help
           python scripts/resolve_companion_versions.py --help
           python scripts/plan_release.py --help
           python scripts/update_release_state.py --help
@@ -334,11 +279,11 @@ jobs:
 
   build:
     needs: [check-upstream, validate-scripts]
-    if: needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cpu_matrix_has_entries == 'true'
+    if: needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cuda_matrix_has_entries == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.check-upstream.outputs.cpu_matrix) }}
+      matrix: ${{ fromJson(needs.check-upstream.outputs.cuda_matrix) }}
     env:
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
@@ -371,12 +316,6 @@ jobs:
             cmake ninja-build build-essential \
             libopenblas-dev libomp-dev
 
-      - name: Install build dependencies (macOS)
-        if: matrix.target_os == 'macos'
-        run: |
-          brew update
-          brew install cmake ninja libomp
-
       - name: Install build dependencies (Windows)
         if: matrix.target_os == 'windows'
         shell: pwsh
@@ -398,14 +337,13 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Install CUDA Toolkit
-        if: matrix.backend == 'cuda'
         uses: Jimver/cuda-toolkit@v0.2.29
         with:
           cuda: '12.4.1'
           method: 'network'
 
       - name: Discover CUDA home (Linux CUDA)
-        if: matrix.backend == 'cuda' && matrix.target_os == 'linux'
+        if: matrix.target_os == 'linux'
         id: cuda_home
         shell: bash
         run: |
@@ -426,7 +364,8 @@ jobs:
             done
           fi
           if [ -z "$cuda_root" ]; then
-            echo "Could not determine CUDA root" >&2; exit 1
+            echo "Could not determine CUDA root" >&2
+            exit 1
           fi
           echo "cuda_root=$cuda_root" >> "$GITHUB_OUTPUT"
           echo "Using CUDA root: $cuda_root"
@@ -452,12 +391,6 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1 --jobs 4
 
-      - name: Fix script permissions (macOS)
-        if: runner.os == 'macOS'
-        shell: bash
-        working-directory: pytorch-src
-        run: find scripts -name "*.sh" -exec chmod +x {} \;
-
       - name: Install PyTorch build requirements
         shell: bash
         working-directory: pytorch-src
@@ -473,7 +406,7 @@ jobs:
           echo "$CMAKE_BIN" >> "$GITHUB_PATH"
 
       - name: Reduce allocator fragmentation (Linux CUDA)
-        if: matrix.target_os == 'linux' && matrix.backend == 'cuda'
+        if: matrix.target_os == 'linux'
         shell: bash
         run: |
           set -euo pipefail
@@ -485,33 +418,8 @@ jobs:
             echo "jemalloc not found; continuing without it"
           fi
 
-      - name: Build libtorch (Linux CPU)
-        if: matrix.target_os == 'linux' && matrix.backend == 'cpu'
-        working-directory: pytorch-src
-        env:
-          USE_CUDA: "0"
-          USE_ROCM: "0"
-          USE_MKLDNN: "1"
-          USE_NUMPY: "1"
-          BUILD_TEST: "0"
-          MAX_JOBS: "3"
-        run: python tools/build_libtorch.py
-
-      - name: Build wheel from libtorch (Linux CPU)
-        if: matrix.target_os == 'linux' && matrix.backend == 'cpu'
-        working-directory: pytorch-src
-        env:
-          USE_CUDA: "0"
-          USE_ROCM: "0"
-          USE_MKLDNN: "1"
-          USE_NUMPY: "1"
-          BUILD_TEST: "0"
-          MAX_JOBS: "3"
-          CMAKE_FRESH: "1"
-        run: python -m build --wheel --no-isolation
-
       - name: Build libtorch (Linux CUDA)
-        if: matrix.target_os == 'linux' && matrix.backend == 'cuda'
+        if: matrix.target_os == 'linux'
         working-directory: pytorch-src
         env:
           USE_CUDA: "1"
@@ -526,7 +434,7 @@ jobs:
         run: python tools/build_libtorch.py
 
       - name: Build wheel from libtorch (Linux CUDA)
-        if: matrix.target_os == 'linux' && matrix.backend == 'cuda'
+        if: matrix.target_os == 'linux'
         working-directory: pytorch-src
         env:
           USE_CUDA: "1"
@@ -541,101 +449,10 @@ jobs:
           CMAKE_FRESH: "1"
         run: python -m build --wheel --no-isolation
 
-      - name: Build libtorch (macOS arm64 MPS)
-        if: matrix.target_os == 'macos' && matrix.target_arch == 'arm64'
-        working-directory: pytorch-src
-        env:
-          USE_CUDA: "0"
-          USE_ROCM: "0"
-          USE_MKLDNN: "0"
-          USE_MPS: "1"
-          USE_NUMPY: "1"
-          BUILD_TEST: "0"
-          MAX_JOBS: "3"
-          MACOSX_DEPLOYMENT_TARGET: "11.0"
-          CMAKE_OSX_ARCHITECTURES: "arm64"
-        run: python tools/build_libtorch.py
-
-      - name: Build wheel from libtorch (macOS arm64 MPS)
-        if: matrix.target_os == 'macos' && matrix.target_arch == 'arm64'
-        working-directory: pytorch-src
-        env:
-          USE_CUDA: "0"
-          USE_ROCM: "0"
-          USE_MKLDNN: "0"
-          USE_MPS: "1"
-          USE_NUMPY: "1"
-          BUILD_TEST: "0"
-          MAX_JOBS: "3"
-          MACOSX_DEPLOYMENT_TARGET: "11.0"
-          CMAKE_OSX_ARCHITECTURES: "arm64"
-          CMAKE_FRESH: "1"
-        run: python -m build --wheel --no-isolation
-
-      - name: Build libtorch (macOS x86_64 CPU)
-        if: matrix.target_os == 'macos' && matrix.target_arch == 'x86_64'
-        working-directory: pytorch-src
-        env:
-          USE_CUDA: "0"
-          USE_ROCM: "0"
-          USE_MKLDNN: "0"
-          USE_NUMPY: "1"
-          BUILD_TEST: "0"
-          MAX_JOBS: "3"
-          MACOSX_DEPLOYMENT_TARGET: "10.15"
-          CMAKE_OSX_ARCHITECTURES: "x86_64"
-        run: python tools/build_libtorch.py
-
-      - name: Build wheel from libtorch (macOS x86_64 CPU)
-        if: matrix.target_os == 'macos' && matrix.target_arch == 'x86_64'
-        working-directory: pytorch-src
-        env:
-          USE_CUDA: "0"
-          USE_ROCM: "0"
-          USE_MKLDNN: "0"
-          USE_NUMPY: "1"
-          BUILD_TEST: "0"
-          MAX_JOBS: "3"
-          MACOSX_DEPLOYMENT_TARGET: "10.15"
-          CMAKE_OSX_ARCHITECTURES: "x86_64"
-          CMAKE_FRESH: "1"
-        run: python -m build --wheel --no-isolation
-
-      - name: Build libtorch (Windows CPU)
-        if: matrix.target_os == 'windows' && matrix.backend == 'cpu'
-        working-directory: pytorch-src
-        shell: pwsh
-        env:
-          USE_CUDA: "0"
-          USE_ROCM: "0"
-          USE_NUMPY: "1"
-          BUILD_TEST: "0"
-          MAX_JOBS: "3"
-          CMAKE_GENERATOR: "Ninja"
-        run: python tools/build_libtorch.py
-
-      - name: Build wheel from libtorch (Windows CPU)
-        if: matrix.target_os == 'windows' && matrix.backend == 'cpu'
-        working-directory: pytorch-src
-        shell: pwsh
-        env:
-          USE_CUDA: "0"
-          USE_ROCM: "0"
-          USE_NUMPY: "1"
-          BUILD_TEST: "0"
-          MAX_JOBS: "3"
-          CMAKE_GENERATOR: "Ninja"
-          CMAKE_FRESH: "1"
-        run: python -m build --wheel --no-isolation
-
       - name: Trim PATH for Windows CUDA build
-        if: matrix.target_os == 'windows' && matrix.backend == 'cuda'
+        if: matrix.target_os == 'windows'
         shell: pwsh
         run: |
-          # ilammy/msvc-dev-cmd already ran vcvars64.bat, adding MSVC paths to PATH.
-          # cmake's CUDA compiler ID test generates a script that calls vcvars64.bat again.
-          # If MSVC paths are still in PATH, the doubled entries push PATH over cmd.exe's
-          # 8191-char limit. Strip MSVC paths now so vcvars64.bat can re-add them cleanly.
           $trimmed = ($env:PATH -split ';' | Select-Object -Unique | Where-Object {
             $_ -ne '' -and
             $_ -notmatch '\\Microsoft Visual Studio\\' -and
@@ -645,7 +462,7 @@ jobs:
           "PATH=$trimmed" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build libtorch (Windows CUDA)
-        if: matrix.target_os == 'windows' && matrix.backend == 'cuda'
+        if: matrix.target_os == 'windows'
         working-directory: pytorch-src
         shell: pwsh
         env:
@@ -659,7 +476,7 @@ jobs:
         run: python tools/build_libtorch.py
 
       - name: Build wheel from libtorch (Windows CUDA)
-        if: matrix.target_os == 'windows' && matrix.backend == 'cuda'
+        if: matrix.target_os == 'windows'
         working-directory: pytorch-src
         shell: pwsh
         env:
@@ -681,51 +498,41 @@ jobs:
           echo "Built wheels:"
           ls -lh dist/
 
-      - name: Validate built wheel (Linux / macOS)
-        if: matrix.target_os != 'windows'
-        env:
-          BUILD_BACKEND: ${{ matrix.backend }}
+      - name: Validate built wheel (Linux)
+        if: matrix.target_os == 'linux'
         shell: bash
         run: |
           WHEEL=$(ls dist/*.whl | head -1)
           pip install --force-reinstall "$WHEEL"
           python -c "
-          import os, torch
+          import torch
           print(f'torch version: {torch.__version__}')
           t = torch.ones(2, 2)
           assert t.sum().item() == 4.0, 'tensor sum check failed'
           linear = torch.nn.Linear(2, 2)
           out = linear(t)
           print(f'nn.Linear output shape: {out.shape}')
-          backend = os.environ.get('BUILD_BACKEND', 'cpu')
-          if backend == 'cuda':
-              assert torch.version.cuda is not None, 'Expected CUDA build but torch.version.cuda is None'
-              print(f'CUDA compiled version: {torch.version.cuda}')
-          elif backend == 'mps':
-              print(f'MPS built-in: {hasattr(torch.backends, \"mps\")}')
+          assert torch.version.cuda is not None, 'Expected CUDA build but torch.version.cuda is None'
+          print(f'CUDA compiled version: {torch.version.cuda}')
           print('smoke-ok')
           "
 
       - name: Validate built wheel (Windows)
         if: matrix.target_os == 'windows'
-        env:
-          BUILD_BACKEND: ${{ matrix.backend }}
         shell: pwsh
         run: |
           $wheel = Get-ChildItem -Path dist -Filter *.whl | Select-Object -First 1
           if (-not $wheel) { throw "No wheel found in dist/" }
           pip install --force-reinstall $wheel.FullName
           python -c "
-          import os, traceback
+          import traceback
           try:
               import torch
               print(f'torch version: {torch.__version__}')
               t = torch.ones(2, 2)
               assert t.sum().item() == 4.0
-              backend = os.environ.get('BUILD_BACKEND', 'cpu')
-              if backend == 'cuda':
-                  assert torch.version.cuda is not None, 'Expected CUDA build but torch.version.cuda is None'
-                  print(f'CUDA compiled version: {torch.version.cuda}')
+              assert torch.version.cuda is not None, 'Expected CUDA build but torch.version.cuda is None'
+              print(f'CUDA compiled version: {torch.version.cuda}')
               print('smoke-ok')
           except Exception:
               traceback.print_exc()
@@ -747,11 +554,11 @@ jobs:
 
   validate-artifacts:
     needs: [check-upstream, build]
-    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cpu_matrix_has_entries == 'true'
+    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cuda_matrix_has_entries == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.check-upstream.outputs.cpu_matrix) }}
+      matrix: ${{ fromJson(needs.check-upstream.outputs.cuda_matrix) }}
     steps:
       - uses: actions/checkout@v6
 
@@ -776,11 +583,6 @@ jobs:
             );
             const artifact = artifacts.find((item) => item.name === artifactName);
             core.setOutput('exists', artifact ? 'true' : 'false');
-            if (artifact) {
-              core.info(`Found artifact ${artifactName}`);
-            } else {
-              core.warning(`Artifact ${artifactName} is missing`);
-            }
 
       - name: Download built wheel
         if: steps.artifact-check.outputs.exists == 'true'
@@ -802,16 +604,16 @@ jobs:
         shell: bash
         run: |
           echo "Missing build artifact for ${{ matrix.artifact_name }}."
-          echo "A corresponding build matrix job failed or timed out before upload."
+          echo "A corresponding CUDA build matrix job failed or timed out before upload."
           exit 1
 
   build-torchvision:
     needs: [check-upstream, build]
-    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cpu_matrix_has_entries == 'true'
+    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cuda_matrix_has_entries == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.check-upstream.outputs.cpu_matrix) }}
+      matrix: ${{ fromJson(needs.check-upstream.outputs.cuda_matrix) }}
     steps:
       - uses: actions/checkout@v6
 
@@ -827,12 +629,6 @@ jobs:
             cmake ninja-build build-essential \
             libjpeg-dev libpng-dev libwebp-dev
 
-      - name: Install build dependencies (macOS)
-        if: matrix.target_os == 'macos'
-        run: |
-          brew update
-          brew install cmake ninja libpng jpeg-turbo webp
-
       - name: Install build dependencies (Windows)
         if: matrix.target_os == 'windows'
         shell: pwsh
@@ -845,14 +641,13 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Install CUDA Toolkit
-        if: matrix.backend == 'cuda'
         uses: Jimver/cuda-toolkit@v0.2.29
         with:
           cuda: '12.4.1'
           method: 'network'
 
       - name: Discover CUDA home (Linux CUDA)
-        if: matrix.backend == 'cuda' && matrix.target_os == 'linux'
+        if: matrix.target_os == 'linux'
         id: torchvision_cuda_home
         shell: bash
         run: |
@@ -903,7 +698,7 @@ jobs:
         shell: bash
         run: |
           echo "Missing torch artifact for ${{ matrix.artifact_name }}."
-          echo "torchvision cannot be built for this matrix entry without the matching torch wheel."
+          echo "torchvision cannot be built for this CUDA matrix entry without the matching torch wheel."
           exit 1
 
       - name: Install built torch wheel
@@ -928,7 +723,7 @@ jobs:
           pip install "cmake<4" ninja numpy pillow
 
       - name: Trim PATH for Windows CUDA build
-        if: matrix.target_os == 'windows' && matrix.backend == 'cuda'
+        if: matrix.target_os == 'windows'
         shell: pwsh
         run: |
           $trimmed = ($env:PATH -split ';' | Select-Object -Unique | Where-Object {
@@ -939,8 +734,8 @@ jobs:
           }) -join ';'
           "PATH=$trimmed" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Build torchvision wheel (Linux / macOS)
-        if: matrix.target_os != 'windows'
+      - name: Build torchvision wheel (Linux)
+        if: matrix.target_os == 'linux'
         shell: bash
         working-directory: vision-src
         env:
@@ -948,18 +743,7 @@ jobs:
           PYTORCH_VERSION: ${{ matrix.torch_version }}
           CUDA_HOME: ${{ steps.torchvision_cuda_home.outputs.cuda_root }}
         run: |
-          export FORCE_CUDA=0
-          export FORCE_MPS=0
-          if [ "${{ matrix.backend }}" = "cuda" ]; then
-            export FORCE_CUDA=1
-          fi
-          if [ "${{ matrix.target_os }}" = "macos" ] && [ "${{ matrix.target_arch }}" = "arm64" ] && [ "${{ matrix.backend }}" = "mps" ]; then
-            export FORCE_MPS=1
-            export MACOSX_DEPLOYMENT_TARGET=11.0
-          fi
-          if [ "${{ matrix.target_os }}" = "macos" ] && [ "${{ matrix.target_arch }}" = "x86_64" ]; then
-            export MACOSX_DEPLOYMENT_TARGET=10.15
-          fi
+          export FORCE_CUDA=1
           python setup.py bdist_wheel
 
       - name: Build torchvision wheel (Windows)
@@ -971,12 +755,9 @@ jobs:
           PYTORCH_VERSION: ${{ matrix.torch_version }}
           DISTUTILS_USE_SDK: "1"
         run: |
-          $env:FORCE_CUDA = '0'
-          if ('${{ matrix.backend }}' -eq 'cuda') {
-            $env:FORCE_CUDA = '1'
-            if ($env:CUDA_PATH) {
-              $env:CUDA_HOME = $env:CUDA_PATH
-            }
+          $env:FORCE_CUDA = '1'
+          if ($env:CUDA_PATH) {
+            $env:CUDA_HOME = $env:CUDA_PATH
           }
           python setup.py bdist_wheel
 
@@ -987,40 +768,34 @@ jobs:
           cp vision-src/dist/*.whl dist/
           ls -lh dist/
 
-      - name: Validate built wheel (Linux / macOS)
-        if: matrix.target_os != 'windows'
-        env:
-          BUILD_BACKEND: ${{ matrix.backend }}
+      - name: Validate built wheel (Linux)
+        if: matrix.target_os == 'linux'
         shell: bash
         run: |
           WHEEL=$(ls dist/*.whl | head -1)
           pip install --force-reinstall --no-deps "$WHEEL"
           python -c "
-          import os, torch, torchvision
+          import torch, torchvision
           print(f'torchvision version: {torchvision.__version__}')
           boxes = torch.tensor([[0.0, 0.0, 10.0, 10.0], [1.0, 1.0, 9.0, 9.0]])
           scores = torch.tensor([0.9, 0.8])
           keep = torchvision.ops.nms(boxes, scores, 0.5)
           print(f'nms keep: {keep.tolist()}')
-          backend = os.environ.get('BUILD_BACKEND', 'cpu')
-          if backend == 'cuda':
-              cuda_version = torch.ops.torchvision._cuda_version()
-              assert cuda_version != -1, 'Expected torchvision CUDA ops to be built'
-              print(f'torchvision cuda version: {cuda_version}')
+          cuda_version = torch.ops.torchvision._cuda_version()
+          assert cuda_version != -1, 'Expected torchvision CUDA ops to be built'
+          print(f'torchvision cuda version: {cuda_version}')
           print('smoke-ok')
           "
 
       - name: Validate built wheel (Windows)
         if: matrix.target_os == 'windows'
-        env:
-          BUILD_BACKEND: ${{ matrix.backend }}
         shell: pwsh
         run: |
           $wheel = Get-ChildItem -Path dist -Filter *.whl | Select-Object -First 1
           if (-not $wheel) { throw "No wheel found in dist/" }
           pip install --force-reinstall --no-deps $wheel.FullName
           python -c "
-          import os, traceback
+          import traceback
           try:
               import torch, torchvision
               print(f'torchvision version: {torchvision.__version__}')
@@ -1028,10 +803,9 @@ jobs:
               scores = torch.tensor([0.9, 0.8])
               keep = torchvision.ops.nms(boxes, scores, 0.5)
               print(f'nms keep: {keep.tolist()}')
-              if os.environ.get('BUILD_BACKEND', 'cpu') == 'cuda':
-                  cuda_version = torch.ops.torchvision._cuda_version()
-                  assert cuda_version != -1, 'Expected torchvision CUDA ops to be built'
-                  print(f'torchvision cuda version: {cuda_version}')
+              cuda_version = torch.ops.torchvision._cuda_version()
+              assert cuda_version != -1, 'Expected torchvision CUDA ops to be built'
+              print(f'torchvision cuda version: {cuda_version}')
               print('smoke-ok')
           except Exception:
               traceback.print_exc()
@@ -1047,11 +821,11 @@ jobs:
 
   build-torchaudio:
     needs: [check-upstream, build]
-    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cpu_matrix_has_entries == 'true'
+    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cuda_matrix_has_entries == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.check-upstream.outputs.cpu_matrix) }}
+      matrix: ${{ fromJson(needs.check-upstream.outputs.cuda_matrix) }}
     steps:
       - uses: actions/checkout@v6
 
@@ -1065,12 +839,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build build-essential
 
-      - name: Install build dependencies (macOS)
-        if: matrix.target_os == 'macos'
-        run: |
-          brew update
-          brew install cmake ninja
-
       - name: Install build dependencies (Windows)
         if: matrix.target_os == 'windows'
         shell: pwsh
@@ -1083,14 +851,13 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Install CUDA Toolkit
-        if: matrix.backend == 'cuda'
         uses: Jimver/cuda-toolkit@v0.2.29
         with:
           cuda: '12.4.1'
           method: 'network'
 
       - name: Discover CUDA home (Linux CUDA)
-        if: matrix.backend == 'cuda' && matrix.target_os == 'linux'
+        if: matrix.target_os == 'linux'
         id: torchaudio_cuda_home
         shell: bash
         run: |
@@ -1111,7 +878,7 @@ jobs:
           fi
           echo "cuda_root=$cuda_root" >> "$GITHUB_OUTPUT"
 
-      - id: torch-audio-artifact-check
+      - id: torch-artifact-check
         name: Check built torch wheel presence
         uses: actions/github-script@v8
         with:
@@ -1130,18 +897,18 @@ jobs:
             core.setOutput('exists', artifact ? 'true' : 'false');
 
       - name: Download built torch wheel
-        if: steps.torch-audio-artifact-check.outputs.exists == 'true'
+        if: steps.torch-artifact-check.outputs.exists == 'true'
         uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.artifact_name }}
           path: dist-torch
 
       - name: Fail when built torch wheel is missing
-        if: steps.torch-audio-artifact-check.outputs.exists != 'true'
+        if: steps.torch-artifact-check.outputs.exists != 'true'
         shell: bash
         run: |
           echo "Missing torch artifact for ${{ matrix.artifact_name }}."
-          echo "torchaudio cannot be built for this matrix entry without the matching torch wheel."
+          echo "torchaudio cannot be built for this CUDA matrix entry without the matching torch wheel."
           exit 1
 
       - name: Install built torch wheel
@@ -1166,7 +933,7 @@ jobs:
           pip install "cmake<4" ninja
 
       - name: Trim PATH for Windows CUDA build
-        if: matrix.target_os == 'windows' && matrix.backend == 'cuda'
+        if: matrix.target_os == 'windows'
         shell: pwsh
         run: |
           $trimmed = ($env:PATH -split ';' | Select-Object -Unique | Where-Object {
@@ -1177,18 +944,15 @@ jobs:
           }) -join ';'
           "PATH=$trimmed" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Build torchaudio wheel (Linux / macOS)
-        if: matrix.target_os != 'windows'
+      - name: Build torchaudio wheel (Linux)
+        if: matrix.target_os == 'linux'
         shell: bash
         working-directory: audio-src
         env:
           BUILD_VERSION: ${{ matrix.torchaudio_version }}
           CUDA_HOME: ${{ steps.torchaudio_cuda_home.outputs.cuda_root }}
         run: |
-          export USE_CUDA=0
-          if [ "${{ matrix.backend }}" = "cuda" ]; then
-            export USE_CUDA=1
-          fi
+          export USE_CUDA=1
           python setup.py bdist_wheel
 
       - name: Build torchaudio wheel (Windows)
@@ -1199,12 +963,9 @@ jobs:
           BUILD_VERSION: ${{ matrix.torchaudio_version }}
           DISTUTILS_USE_SDK: "1"
         run: |
-          $env:USE_CUDA = '0'
-          if ('${{ matrix.backend }}' -eq 'cuda') {
-            $env:USE_CUDA = '1'
-            if ($env:CUDA_PATH) {
-              $env:CUDA_HOME = $env:CUDA_PATH
-            }
+          $env:USE_CUDA = '1'
+          if ($env:CUDA_PATH) {
+            $env:CUDA_HOME = $env:CUDA_PATH
           }
           python setup.py bdist_wheel
 
@@ -1215,48 +976,42 @@ jobs:
           cp audio-src/dist/*.whl dist/
           ls -lh dist/
 
-      - name: Validate built wheel (Linux / macOS)
-        if: matrix.target_os != 'windows'
-        env:
-          BUILD_BACKEND: ${{ matrix.backend }}
+      - name: Validate built wheel (Linux)
+        if: matrix.target_os == 'linux'
         shell: bash
         run: |
           WHEEL=$(ls dist/*.whl | head -1)
           pip install --force-reinstall --no-deps "$WHEEL"
           python -c "
-          import os, torch, torchaudio
+          import torch, torchaudio
           print(f'torchaudio version: {torchaudio.__version__}')
           waveform = torch.zeros(1, 16000)
           spec = torchaudio.transforms.MelSpectrogram(sample_rate=16000)(waveform)
           print(f'mel spectrogram shape: {tuple(spec.shape)}')
-          if os.environ.get('BUILD_BACKEND', 'cpu') == 'cuda':
-              cuda_version = torchaudio._extension._check_cuda_version()
-              assert cuda_version is not None, 'Expected torchaudio CUDA build'
-              print(f'torchaudio cuda version: {cuda_version}')
+          cuda_version = torchaudio._extension._check_cuda_version()
+          assert cuda_version is not None, 'Expected torchaudio CUDA build'
+          print(f'torchaudio cuda version: {cuda_version}')
           print('smoke-ok')
           "
 
       - name: Validate built wheel (Windows)
         if: matrix.target_os == 'windows'
-        env:
-          BUILD_BACKEND: ${{ matrix.backend }}
         shell: pwsh
         run: |
           $wheel = Get-ChildItem -Path dist -Filter *.whl | Select-Object -First 1
           if (-not $wheel) { throw "No wheel found in dist/" }
           pip install --force-reinstall --no-deps $wheel.FullName
           python -c "
-          import os, traceback
+          import traceback
           try:
               import torch, torchaudio
               print(f'torchaudio version: {torchaudio.__version__}')
               waveform = torch.zeros(1, 16000)
               spec = torchaudio.transforms.MelSpectrogram(sample_rate=16000)(waveform)
               print(f'mel spectrogram shape: {tuple(spec.shape)}')
-              if os.environ.get('BUILD_BACKEND', 'cpu') == 'cuda':
-                  cuda_version = torchaudio._extension._check_cuda_version()
-                  assert cuda_version is not None, 'Expected torchaudio CUDA build'
-                  print(f'torchaudio cuda version: {cuda_version}')
+              cuda_version = torchaudio._extension._check_cuda_version()
+              assert cuda_version is not None, 'Expected torchaudio CUDA build'
+              print(f'torchaudio cuda version: {cuda_version}')
               print('smoke-ok')
           except Exception:
               traceback.print_exc()
@@ -1272,11 +1027,11 @@ jobs:
 
   validate-torchvision-artifacts:
     needs: [check-upstream, build-torchvision]
-    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cpu_matrix_has_entries == 'true'
+    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cuda_matrix_has_entries == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.check-upstream.outputs.cpu_matrix) }}
+      matrix: ${{ fromJson(needs.check-upstream.outputs.cuda_matrix) }}
     steps:
       - uses: actions/checkout@v6
 
@@ -1323,16 +1078,16 @@ jobs:
         shell: bash
         run: |
           echo "Missing build artifact for ${{ matrix.torchvision_artifact_name }}."
-          echo "A corresponding torchvision matrix job failed before upload."
+          echo "A corresponding CUDA torchvision matrix job failed before upload."
           exit 1
 
   validate-torchaudio-artifacts:
     needs: [check-upstream, build-torchaudio]
-    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cpu_matrix_has_entries == 'true'
+    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cuda_matrix_has_entries == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.check-upstream.outputs.cpu_matrix) }}
+      matrix: ${{ fromJson(needs.check-upstream.outputs.cuda_matrix) }}
     steps:
       - uses: actions/checkout@v6
 
@@ -1379,11 +1134,11 @@ jobs:
         shell: bash
         run: |
           echo "Missing build artifact for ${{ matrix.torchaudio_artifact_name }}."
-          echo "A corresponding torchaudio matrix job failed before upload."
+          echo "A corresponding CUDA torchaudio matrix job failed before upload."
           exit 1
 
-  release-cpu:
-    if: needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cpu_matrix_has_entries == 'true'
+  release:
+    if: needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cuda_matrix_has_entries == 'true'
     needs: [check-upstream, validate-artifacts, validate-torchvision-artifacts, validate-torchaudio-artifacts]
     runs-on: ubuntu-latest
     permissions:
@@ -1392,24 +1147,17 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: ${{ github.ref_name }}
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name }}
 
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
-      - name: Download CPU artifacts
+      - name: Download CUDA artifacts
         uses: actions/download-artifact@v8
         with:
           path: release-assets
-          pattern: '*-cpu'
-          merge-multiple: true
-
-      - name: Download MPS artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: release-assets
-          pattern: '*-mps'
+          pattern: '*-cuda'
           merge-multiple: true
 
       - name: Generate checksums
@@ -1429,7 +1177,7 @@ jobs:
           python scripts/update_release_state.py \
             --plan-file release-plan.json \
             --output-dir release-state \
-            --build-source-commit "${{ github.sha }}" \
+            --build-source-commit "${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}" \
             --workflow-run-id "${{ github.run_id }}" \
             --workflow-run-url "${GITHUB_RUN_URL}" \
             --repository "${{ github.repository }}" \
@@ -1449,8 +1197,8 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Record release state for ${{ needs.check-upstream.outputs.release_tag }}"
-          git push origin HEAD:${{ github.ref_name }}
+          git commit -m "Record CUDA release state for ${{ needs.check-upstream.outputs.release_tag }}"
+          git push origin HEAD:${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name }}
           echo "release_commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - id: push-tag
@@ -1492,25 +1240,20 @@ jobs:
             ### Package Layout
             - The release tag is shared across the full package family and remains torch-based.
             - `torch`, `torchvision`, and `torchaudio` are published as separate wheel files.
-            - Each torchvision and torchaudio wheel is built against the matching torch wheel for the same matrix entry.
-            - This workflow publishes CPU and MPS assets first.
-            - The follow-up CUDA workflow appends any missing CUDA assets to the same release tag.
+            - CPU and MPS assets are published by the CPU workflow first.
+            - Missing CUDA assets are appended by this follow-up CUDA workflow.
 
             ### Platforms & Backends
             | Platform | Backend |
             |---|---|
-            | Linux x86\_64 | CPU |
-            | Windows x86\_64 | CPU |
-            | macOS x86\_64 (Intel) | CPU |
-            | macOS arm64 (Apple Silicon) | MPS (Metal) |
+            | Linux x86\_64 | CUDA 12.4 |
+            | Windows x86\_64 | CUDA 12.4 |
 
             ### Python Versions
-            See attached wheel filenames for the CPU and MPS matrix.
+            See attached wheel filenames for the full CUDA matrix.
 
             ### Notes
             - These wheels preserve the normal package split: install `torch`, `torchvision`, and `torchaudio` separately as needed.
-            - The torch wheel keeps the same API surface as official PyPI torch wheels.
             - CUDA wheels include compiled CUDA kernels. A physical NVIDIA GPU is required at runtime for GPU acceleration.
-            - MPS wheels use Apple Metal for GPU acceleration on Apple Silicon.
             - Torch is built from the official PyTorch source at tag `v${{ needs.check-upstream.outputs.torch_version }}`.
           files: release-assets/*

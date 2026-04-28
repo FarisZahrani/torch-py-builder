@@ -59,7 +59,7 @@ def main() -> None:
 
     if args.release_tag:
         release_tag = args.release_tag
-    elif should_build:
+    elif current_version:
         release_tag = f"torch-{current_version}"
     else:
         release_tag = ""
