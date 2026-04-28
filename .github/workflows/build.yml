@@ -380,6 +380,19 @@ jobs:
           CMAKE_BIN=$(python -c "import cmake, os; print(os.path.join(os.path.dirname(cmake.__file__), 'data', 'bin'))")
           echo "$CMAKE_BIN" >> "$GITHUB_PATH"
 
+      - name: Reduce allocator fragmentation (Linux CUDA)
+        if: matrix.target_os == 'linux' && matrix.backend == 'cuda'
+        shell: bash
+        run: |
+          set -euo pipefail
+          jemalloc_lib="$(find /usr/lib* -name 'libjemalloc.so.2' 2>/dev/null | head -1 || true)"
+          if [ -n "$jemalloc_lib" ]; then
+            echo "LD_PRELOAD=$jemalloc_lib" >> "$GITHUB_ENV"
+            echo "Using jemalloc: $jemalloc_lib"
+          else
+            echo "jemalloc not found; continuing without it"
+          fi
+
       - name: Build libtorch (Linux CPU)
         if: matrix.target_os == 'linux' && matrix.backend == 'cpu'
         working-directory: pytorch-src
@@ -389,7 +402,7 @@ jobs:
           USE_MKLDNN: "1"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
-          MAX_JOBS: "4"
+          MAX_JOBS: "2"
         run: python tools/build_libtorch.py
 
       - name: Build wheel from libtorch (Linux CPU)
@@ -401,7 +414,7 @@ jobs:
           USE_MKLDNN: "1"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
-          MAX_JOBS: "4"
+          MAX_JOBS: "2"
           CMAKE_FRESH: "1"
         run: python -m build --wheel --no-isolation
 
@@ -415,9 +428,9 @@ jobs:
           USE_NUMPY: "1"
           USE_DISTRIBUTED: "0"
           BUILD_TEST: "0"
-          MAX_JOBS: "4"
+          MAX_JOBS: "2"
           CUDA_HOME: ${{ steps.cuda_home.outputs.cuda_root }}
-          TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
+          TORCH_CUDA_ARCH_LIST: "5.0;6.0;7.0;7.5;8.0;8.6;8.9;9.0+PTX"
         run: python tools/build_libtorch.py
 
       - name: Build wheel from libtorch (Linux CUDA)
@@ -430,9 +443,9 @@ jobs:
           USE_NUMPY: "1"
           USE_DISTRIBUTED: "0"
           BUILD_TEST: "0"
-          MAX_JOBS: "4"
+          MAX_JOBS: "2"
           CUDA_HOME: ${{ steps.cuda_home.outputs.cuda_root }}
-          TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
+          TORCH_CUDA_ARCH_LIST: "5.0;6.0;7.0;7.5;8.0;8.6;8.9;9.0+PTX"
           CMAKE_FRESH: "1"
         run: python -m build --wheel --no-isolation
 
@@ -446,7 +459,7 @@ jobs:
           USE_MPS: "1"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
-          MAX_JOBS: "4"
+          MAX_JOBS: "2"
           MACOSX_DEPLOYMENT_TARGET: "11.0"
           CMAKE_OSX_ARCHITECTURES: "arm64"
         run: python tools/build_libtorch.py
@@ -461,7 +474,7 @@ jobs:
           USE_MPS: "1"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
-          MAX_JOBS: "4"
+          MAX_JOBS: "2"
           MACOSX_DEPLOYMENT_TARGET: "11.0"
           CMAKE_OSX_ARCHITECTURES: "arm64"
           CMAKE_FRESH: "1"
@@ -476,7 +489,7 @@ jobs:
           USE_MKLDNN: "0"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
-          MAX_JOBS: "4"
+          MAX_JOBS: "2"
           MACOSX_DEPLOYMENT_TARGET: "10.15"
           CMAKE_OSX_ARCHITECTURES: "x86_64"
         run: python tools/build_libtorch.py
@@ -490,7 +503,7 @@ jobs:
           USE_MKLDNN: "0"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
-          MAX_JOBS: "4"
+          MAX_JOBS: "2"
           MACOSX_DEPLOYMENT_TARGET: "10.15"
           CMAKE_OSX_ARCHITECTURES: "x86_64"
           CMAKE_FRESH: "1"
@@ -505,7 +518,7 @@ jobs:
           USE_ROCM: "0"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
-          MAX_JOBS: "4"
+          MAX_JOBS: "2"
           CMAKE_GENERATOR: "Ninja"
         run: python tools/build_libtorch.py
 
@@ -518,7 +531,7 @@ jobs:
           USE_ROCM: "0"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
-          MAX_JOBS: "4"
+          MAX_JOBS: "2"
           CMAKE_GENERATOR: "Ninja"
           CMAKE_FRESH: "1"
         run: python -m build --wheel --no-isolation
@@ -548,7 +561,7 @@ jobs:
           USE_ROCM: "0"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
-          MAX_JOBS: "4"
+          MAX_JOBS: "2"
           CMAKE_GENERATOR: "Ninja"
           TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
         run: python tools/build_libtorch.py
@@ -562,7 +575,7 @@ jobs:
           USE_ROCM: "0"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
-          MAX_JOBS: "4"
+          MAX_JOBS: "2"
           CMAKE_GENERATOR: "Ninja"
           TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
           CMAKE_FRESH: "1"
