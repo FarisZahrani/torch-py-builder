@@ -495,7 +495,14 @@ jobs:
           USE_NUMPY: "1"
           BUILD_TEST: "0"
           MAX_JOBS: "3"
-        run: python tools/build_libtorch.py
+        run: |
+          PYTHON_BIN=$(python -c "import sys; print(sys.executable)")
+          PYTHON_TAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          export PYTHON_EXECUTABLE="$PYTHON_BIN"
+          export Python_EXECUTABLE="$PYTHON_BIN"
+          export Python3_EXECUTABLE="$PYTHON_BIN"
+          export DESIRED_PYTHON="$PYTHON_TAG"
+          python tools/build_libtorch.py
 
       - name: Build wheel from libtorch (Linux CPU)
         if: matrix.target_os == 'linux' && matrix.backend == 'cpu'
@@ -508,7 +515,14 @@ jobs:
           BUILD_TEST: "0"
           MAX_JOBS: "3"
           CMAKE_FRESH: "1"
-        run: python -m build --wheel --no-isolation
+        run: |
+          PYTHON_BIN=$(python -c "import sys; print(sys.executable)")
+          PYTHON_TAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          export PYTHON_EXECUTABLE="$PYTHON_BIN"
+          export Python_EXECUTABLE="$PYTHON_BIN"
+          export Python3_EXECUTABLE="$PYTHON_BIN"
+          export DESIRED_PYTHON="$PYTHON_TAG"
+          python -m build --wheel --no-isolation
 
       - name: Build libtorch (Linux CUDA)
         if: matrix.target_os == 'linux' && matrix.backend == 'cuda'
@@ -523,7 +537,14 @@ jobs:
           MAX_JOBS: "3"
           CUDA_HOME: ${{ steps.cuda_home.outputs.cuda_root }}
           TORCH_CUDA_ARCH_LIST: "5.0;6.0;7.0;7.5;8.0;8.6;8.9;9.0+PTX"
-        run: python tools/build_libtorch.py
+        run: |
+          PYTHON_BIN=$(python -c "import sys; print(sys.executable)")
+          PYTHON_TAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          export PYTHON_EXECUTABLE="$PYTHON_BIN"
+          export Python_EXECUTABLE="$PYTHON_BIN"
+          export Python3_EXECUTABLE="$PYTHON_BIN"
+          export DESIRED_PYTHON="$PYTHON_TAG"
+          python tools/build_libtorch.py
 
       - name: Build wheel from libtorch (Linux CUDA)
         if: matrix.target_os == 'linux' && matrix.backend == 'cuda'
@@ -539,7 +560,14 @@ jobs:
           CUDA_HOME: ${{ steps.cuda_home.outputs.cuda_root }}
           TORCH_CUDA_ARCH_LIST: "5.0;6.0;7.0;7.5;8.0;8.6;8.9;9.0+PTX"
           CMAKE_FRESH: "1"
-        run: python -m build --wheel --no-isolation
+        run: |
+          PYTHON_BIN=$(python -c "import sys; print(sys.executable)")
+          PYTHON_TAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          export PYTHON_EXECUTABLE="$PYTHON_BIN"
+          export Python_EXECUTABLE="$PYTHON_BIN"
+          export Python3_EXECUTABLE="$PYTHON_BIN"
+          export DESIRED_PYTHON="$PYTHON_TAG"
+          python -m build --wheel --no-isolation
 
       - name: Build libtorch (macOS arm64 MPS)
         if: matrix.target_os == 'macos' && matrix.target_arch == 'arm64'
@@ -554,7 +582,14 @@ jobs:
           MAX_JOBS: "3"
           MACOSX_DEPLOYMENT_TARGET: "11.0"
           CMAKE_OSX_ARCHITECTURES: "arm64"
-        run: python tools/build_libtorch.py
+        run: |
+          PYTHON_BIN=$(python -c "import sys; print(sys.executable)")
+          PYTHON_TAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          export PYTHON_EXECUTABLE="$PYTHON_BIN"
+          export Python_EXECUTABLE="$PYTHON_BIN"
+          export Python3_EXECUTABLE="$PYTHON_BIN"
+          export DESIRED_PYTHON="$PYTHON_TAG"
+          python tools/build_libtorch.py
 
       - name: Build wheel from libtorch (macOS arm64 MPS)
         if: matrix.target_os == 'macos' && matrix.target_arch == 'arm64'
@@ -570,7 +605,14 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
           CMAKE_OSX_ARCHITECTURES: "arm64"
           CMAKE_FRESH: "1"
-        run: python -m build --wheel --no-isolation
+        run: |
+          PYTHON_BIN=$(python -c "import sys; print(sys.executable)")
+          PYTHON_TAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          export PYTHON_EXECUTABLE="$PYTHON_BIN"
+          export Python_EXECUTABLE="$PYTHON_BIN"
+          export Python3_EXECUTABLE="$PYTHON_BIN"
+          export DESIRED_PYTHON="$PYTHON_TAG"
+          python -m build --wheel --no-isolation
 
       - name: Build libtorch (macOS x86_64 CPU)
         if: matrix.target_os == 'macos' && matrix.target_arch == 'x86_64'
@@ -584,7 +626,14 @@ jobs:
           MAX_JOBS: "3"
           MACOSX_DEPLOYMENT_TARGET: "10.15"
           CMAKE_OSX_ARCHITECTURES: "x86_64"
-        run: python tools/build_libtorch.py
+        run: |
+          PYTHON_BIN=$(python -c "import sys; print(sys.executable)")
+          PYTHON_TAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          export PYTHON_EXECUTABLE="$PYTHON_BIN"
+          export Python_EXECUTABLE="$PYTHON_BIN"
+          export Python3_EXECUTABLE="$PYTHON_BIN"
+          export DESIRED_PYTHON="$PYTHON_TAG"
+          python tools/build_libtorch.py
 
       - name: Build wheel from libtorch (macOS x86_64 CPU)
         if: matrix.target_os == 'macos' && matrix.target_arch == 'x86_64'
@@ -599,7 +648,14 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: "10.15"
           CMAKE_OSX_ARCHITECTURES: "x86_64"
           CMAKE_FRESH: "1"
-        run: python -m build --wheel --no-isolation
+        run: |
+          PYTHON_BIN=$(python -c "import sys; print(sys.executable)")
+          PYTHON_TAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          export PYTHON_EXECUTABLE="$PYTHON_BIN"
+          export Python_EXECUTABLE="$PYTHON_BIN"
+          export Python3_EXECUTABLE="$PYTHON_BIN"
+          export DESIRED_PYTHON="$PYTHON_TAG"
+          python -m build --wheel --no-isolation
 
       - name: Build libtorch (Windows CPU)
         if: matrix.target_os == 'windows' && matrix.backend == 'cpu'
@@ -612,7 +668,14 @@ jobs:
           BUILD_TEST: "0"
           MAX_JOBS: "3"
           CMAKE_GENERATOR: "Ninja"
-        run: python tools/build_libtorch.py
+        run: |
+          $pythonExe = python -c "import sys; print(sys.executable)"
+          $pythonTag = python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"
+          $env:PYTHON_EXECUTABLE = $pythonExe
+          $env:Python_EXECUTABLE = $pythonExe
+          $env:Python3_EXECUTABLE = $pythonExe
+          $env:DESIRED_PYTHON = $pythonTag
+          python tools/build_libtorch.py
 
       - name: Build wheel from libtorch (Windows CPU)
         if: matrix.target_os == 'windows' && matrix.backend == 'cpu'
@@ -626,7 +689,14 @@ jobs:
           MAX_JOBS: "3"
           CMAKE_GENERATOR: "Ninja"
           CMAKE_FRESH: "1"
-        run: python -m build --wheel --no-isolation
+        run: |
+          $pythonExe = python -c "import sys; print(sys.executable)"
+          $pythonTag = python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"
+          $env:PYTHON_EXECUTABLE = $pythonExe
+          $env:Python_EXECUTABLE = $pythonExe
+          $env:Python3_EXECUTABLE = $pythonExe
+          $env:DESIRED_PYTHON = $pythonTag
+          python -m build --wheel --no-isolation
 
       - name: Trim PATH for Windows CUDA build
         if: matrix.target_os == 'windows' && matrix.backend == 'cuda'
@@ -656,7 +726,14 @@ jobs:
           MAX_JOBS: "3"
           CMAKE_GENERATOR: "Ninja"
           TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
-        run: python tools/build_libtorch.py
+        run: |
+          $pythonExe = python -c "import sys; print(sys.executable)"
+          $pythonTag = python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"
+          $env:PYTHON_EXECUTABLE = $pythonExe
+          $env:Python_EXECUTABLE = $pythonExe
+          $env:Python3_EXECUTABLE = $pythonExe
+          $env:DESIRED_PYTHON = $pythonTag
+          python tools/build_libtorch.py
 
       - name: Build wheel from libtorch (Windows CUDA)
         if: matrix.target_os == 'windows' && matrix.backend == 'cuda'
@@ -671,7 +748,14 @@ jobs:
           CMAKE_GENERATOR: "Ninja"
           TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
           CMAKE_FRESH: "1"
-        run: python -m build --wheel --no-isolation
+        run: |
+          $pythonExe = python -c "import sys; print(sys.executable)"
+          $pythonTag = python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"
+          $env:PYTHON_EXECUTABLE = $pythonExe
+          $env:Python_EXECUTABLE = $pythonExe
+          $env:Python3_EXECUTABLE = $pythonExe
+          $env:DESIRED_PYTHON = $pythonTag
+          python -m build --wheel --no-isolation
 
       - name: Collect built wheel
         shell: bash
@@ -680,6 +764,27 @@ jobs:
           cp pytorch-src/dist/*.whl dist/
           echo "Built wheels:"
           ls -lh dist/
+
+      - name: Verify built wheel tag
+        shell: bash
+        run: |
+          python - <<'PY'
+          import pathlib
+          import sys
+
+          wheels = sorted(pathlib.Path("dist").glob("*.whl"))
+          if not wheels:
+              raise SystemExit("No wheel found in dist/")
+
+          wheel = wheels[0].name
+          expected_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+          if expected_tag not in wheel:
+              raise SystemExit(
+                  f"Wheel tag mismatch: expected {expected_tag} in {wheel}"
+              )
+
+          print(f"Verified wheel tag: {wheel}")
+          PY
 
       - name: Validate built wheel (Linux / macOS)
         if: matrix.target_os != 'windows'
@@ -925,7 +1030,7 @@ jobs:
         shell: bash
         working-directory: vision-src
         run: |
-          pip install "cmake<4" ninja numpy pillow
+          pip install "cmake<4" ninja numpy pillow "setuptools<82" wheel
 
       - name: Trim PATH for Windows CUDA build
         if: matrix.target_os == 'windows' && matrix.backend == 'cuda'
@@ -947,6 +1052,7 @@ jobs:
           BUILD_VERSION: ${{ matrix.torchvision_version }}
           PYTORCH_VERSION: ${{ matrix.torch_version }}
           CUDA_HOME: ${{ steps.torchvision_cuda_home.outputs.cuda_root }}
+          SETUPTOOLS_USE_DISTUTILS: local
         run: |
           export FORCE_CUDA=0
           export FORCE_MPS=0
@@ -970,6 +1076,7 @@ jobs:
           BUILD_VERSION: ${{ matrix.torchvision_version }}
           PYTORCH_VERSION: ${{ matrix.torch_version }}
           DISTUTILS_USE_SDK: "1"
+          SETUPTOOLS_USE_DISTUTILS: local
         run: |
           $env:FORCE_CUDA = '0'
           if ('${{ matrix.backend }}' -eq 'cuda') {
@@ -1163,7 +1270,7 @@ jobs:
         shell: bash
         working-directory: audio-src
         run: |
-          pip install "cmake<4" ninja
+          pip install "cmake<4" ninja "setuptools<82" wheel
 
       - name: Trim PATH for Windows CUDA build
         if: matrix.target_os == 'windows' && matrix.backend == 'cuda'
@@ -1184,6 +1291,7 @@ jobs:
         env:
           BUILD_VERSION: ${{ matrix.torchaudio_version }}
           CUDA_HOME: ${{ steps.torchaudio_cuda_home.outputs.cuda_root }}
+          SETUPTOOLS_USE_DISTUTILS: local
         run: |
           export USE_CUDA=0
           if [ "${{ matrix.backend }}" = "cuda" ]; then
@@ -1198,6 +1306,7 @@ jobs:
         env:
           BUILD_VERSION: ${{ matrix.torchaudio_version }}
           DISTUTILS_USE_SDK: "1"
+          SETUPTOOLS_USE_DISTUTILS: local
         run: |
           $env:USE_CUDA = '0'
           if ('${{ matrix.backend }}' -eq 'cuda') {
