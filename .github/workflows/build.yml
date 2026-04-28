@@ -186,23 +186,23 @@ jobs:
                       f"torch-{torch_version}-py{py_nodot}"
                       f"-{target['target_os']}-{target['target_arch']}-{backend}"
                   )
-                    torchvision_artifact_name = (
+                  torchvision_artifact_name = (
                       f"torchvision-{torchvision_version}-py{py_nodot}"
                       f"-{target['target_os']}-{target['target_arch']}-{backend}"
-                    )
-                    torchaudio_artifact_name = (
+                  )
+                  torchaudio_artifact_name = (
                       f"torchaudio-{torchaudio_version}-py{py_nodot}"
                       f"-{target['target_os']}-{target['target_arch']}-{backend}"
-                    )
+                  )
                   include.append(
                       {
                           "torch_version": torch_version,
-                        "torchvision_version": torchvision_version,
-                        "torchaudio_version": torchaudio_version,
+                          "torchvision_version": torchvision_version,
+                          "torchaudio_version": torchaudio_version,
                           "python_version": py_version,
                           "artifact_name": artifact_name,
-                        "torchvision_artifact_name": torchvision_artifact_name,
-                        "torchaudio_artifact_name": torchaudio_artifact_name,
+                          "torchvision_artifact_name": torchvision_artifact_name,
+                          "torchaudio_artifact_name": torchaudio_artifact_name,
                           **target,
                       }
                   )
