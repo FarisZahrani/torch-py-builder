@@ -291,6 +291,8 @@ jobs:
       CMAKE_C_COMPILER_LAUNCHER: sccache
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
       CMAKE_CUDA_COMPILER_LAUNCHER: sccache
+      PYTORCH_BUILD_VERSION: ${{ matrix.torch_version }}
+      PYTORCH_BUILD_NUMBER: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -785,7 +787,38 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install --force-reinstall dist-torch/*.whl
+          WHEEL=$(python - <<'PY'
+          import pathlib
+          import sys
+
+          wheel_dir = pathlib.Path('dist-torch')
+          expected_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+          wheels = sorted(wheel_dir.glob('*.whl'))
+          matches = [wheel for wheel in wheels if expected_tag in wheel.name]
+
+          if not matches:
+            found = ', '.join(wheel.name for wheel in wheels) or '<none>'
+            raise SystemExit(
+              f"No torch wheel matching {expected_tag} found in dist-torch/: {found}"
+            )
+
+          print(matches[0])
+          PY
+          )
+          echo "Installing torch wheel: $WHEEL"
+          pip install --force-reinstall "$WHEEL"
+
+      - id: installed_torch_version
+        name: Capture installed torch version
+        shell: bash
+        run: |
+          TORCH_VERSION=$(python - <<'PY'
+          import torch
+          print(torch.__version__)
+          PY
+          )
+          echo "Detected installed torch version: $TORCH_VERSION"
+          echo "value=$TORCH_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Clone torchvision source
         shell: bash
@@ -820,7 +853,7 @@ jobs:
         working-directory: vision-src
         env:
           BUILD_VERSION: ${{ matrix.torchvision_version }}
-          PYTORCH_VERSION: ${{ matrix.torch_version }}
+          PYTORCH_VERSION: ${{ steps.installed_torch_version.outputs.value }}
           CUDA_HOME: ${{ steps.torchvision_cuda_home.outputs.cuda_root }}
           SETUPTOOLS_USE_DISTUTILS: local
         run: |
@@ -833,7 +866,7 @@ jobs:
         working-directory: vision-src
         env:
           BUILD_VERSION: ${{ matrix.torchvision_version }}
-          PYTORCH_VERSION: ${{ matrix.torch_version }}
+          PYTORCH_VERSION: ${{ steps.installed_torch_version.outputs.value }}
           DISTUTILS_USE_SDK: "1"
           SETUPTOOLS_USE_DISTUTILS: local
         run: |
@@ -997,7 +1030,26 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install --force-reinstall dist-torch/*.whl
+          WHEEL=$(python - <<'PY'
+          import pathlib
+          import sys
+
+          wheel_dir = pathlib.Path('dist-torch')
+          expected_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+          wheels = sorted(wheel_dir.glob('*.whl'))
+          matches = [wheel for wheel in wheels if expected_tag in wheel.name]
+
+          if not matches:
+            found = ', '.join(wheel.name for wheel in wheels) or '<none>'
+            raise SystemExit(
+              f"No torch wheel matching {expected_tag} found in dist-torch/: {found}"
+            )
+
+          print(matches[0])
+          PY
+          )
+          echo "Installing torch wheel: $WHEEL"
+          pip install --force-reinstall "$WHEEL"
 
       - name: Clone torchaudio source
         shell: bash
