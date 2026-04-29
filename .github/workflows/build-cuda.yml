@@ -521,8 +521,37 @@ jobs:
       - name: Collect built wheel
         shell: bash
         run: |
-          mkdir -p dist
-          cp pytorch-src/dist/*.whl dist/
+          python - <<'PY'
+          import pathlib
+          import shutil
+          import sys
+
+          source_dir = pathlib.Path("pytorch-src/dist")
+          target_dir = pathlib.Path("dist")
+          expected_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+          all_wheels = sorted(source_dir.glob("*.whl"))
+          if not all_wheels:
+            raise SystemExit("No wheel found in pytorch-src/dist/")
+
+          matches = [wheel for wheel in all_wheels if expected_tag in wheel.name]
+          if not matches:
+            found = ", ".join(wheel.name for wheel in all_wheels)
+            raise SystemExit(
+              f"No wheel matching {expected_tag} found in pytorch-src/dist/: {found}"
+            )
+
+          if target_dir.exists():
+            shutil.rmtree(target_dir)
+          target_dir.mkdir()
+
+          for wheel in matches:
+            shutil.copy2(wheel, target_dir / wheel.name)
+
+          print(f"Selected wheels for upload ({expected_tag}):")
+          for wheel in matches:
+            print(f" - {wheel.name}")
+          PY
           echo "Built wheels:"
           ls -lh dist/
 
@@ -537,14 +566,16 @@ jobs:
           if not wheels:
               raise SystemExit("No wheel found in dist/")
 
-          wheel = wheels[0].name
           expected_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
-          if expected_tag not in wheel:
+          for wheel in wheels:
+            if expected_tag not in wheel.name:
               raise SystemExit(
-                  f"Wheel tag mismatch: expected {expected_tag} in {wheel}"
+                f"Wheel tag mismatch: expected {expected_tag} in {wheel.name}"
               )
 
-          print(f"Verified wheel tag: {wheel}")
+          print("Verified wheel tags:")
+          for wheel in wheels:
+            print(f" - {wheel.name}")
           PY
 
       - name: Validate built wheel (Linux)
@@ -754,7 +785,7 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install --force-reinstall --no-deps dist-torch/*.whl
+          pip install --force-reinstall dist-torch/*.whl
 
       - name: Clone torchvision source
         shell: bash
@@ -966,7 +997,7 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install --force-reinstall --no-deps dist-torch/*.whl
+          pip install --force-reinstall dist-torch/*.whl
 
       - name: Clone torchaudio source
         shell: bash
