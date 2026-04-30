@@ -296,10 +296,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python_version }}
-
       - name: Free disk space (Linux)
         if: matrix.target_os == 'linux'
         run: |
@@ -309,6 +305,10 @@ jobs:
           sudo apt-get autoremove -y
           sudo apt-get clean
           df -h
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python_version }}
 
       - name: Install build dependencies (Linux)
         if: matrix.target_os == 'linux'
@@ -527,11 +527,10 @@ jobs:
           python - <<'PY'
           import pathlib
           import shutil
-          import sys
 
           source_dir = pathlib.Path("pytorch-src/dist")
           target_dir = pathlib.Path("dist")
-          expected_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+          expected_tag = "cp${{ matrix.python_version }}".replace(".", "")
 
           all_wheels = sorted(source_dir.glob("*.whl"))
           if not all_wheels:
@@ -574,13 +573,12 @@ jobs:
         run: |
           python - <<'PY'
           import pathlib
-          import sys
 
           wheels = sorted(pathlib.Path("dist").glob("*.whl"))
           if not wheels:
               raise SystemExit("No wheel found in dist/")
 
-          expected_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+          expected_tag = "cp${{ matrix.python_version }}".replace(".", "")
           for wheel in wheels:
             if expected_tag not in wheel.name:
               raise SystemExit(
