@@ -1592,6 +1592,7 @@ jobs:
     needs: [check-upstream, validate-artifacts, validate-torchvision-artifacts, validate-torchaudio-artifacts]
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
     steps:
       - uses: actions/checkout@v6
@@ -1719,3 +1720,21 @@ jobs:
             - MPS wheels use Apple Metal for GPU acceleration on Apple Silicon.
             - Torch is built from the official PyTorch source at tag `v${{ needs.check-upstream.outputs.torch_version }}`.
           files: release-assets/*
+
+      - name: Dispatch CUDA follow-up workflow
+        uses: actions/github-script@v8
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'build-cuda.yml',
+              ref: context.ref.replace('refs/heads/', ''),
+              inputs: {
+                force_rebuild: 'false',
+                target_os_filter: 'any',
+                target_arch_filter: 'any',
+                python_version_filter: '',
+                release_tag: '${{ needs.check-upstream.outputs.release_tag }}',
+              },
+            })
