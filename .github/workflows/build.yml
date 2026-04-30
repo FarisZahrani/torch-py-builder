@@ -668,7 +668,7 @@ jobs:
           USE_ROCM: "0"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
-          MAX_JOBS: "3"
+          MAX_JOBS: "4"
           CMAKE_GENERATOR: "Ninja"
         run: |
           $pythonExe = python -c "import sys; print(sys.executable)"
@@ -688,7 +688,7 @@ jobs:
           USE_ROCM: "0"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
-          MAX_JOBS: "3"
+          MAX_JOBS: "4"
           CMAKE_GENERATOR: "Ninja"
           CMAKE_FRESH: "1"
         run: |
@@ -725,7 +725,7 @@ jobs:
           USE_ROCM: "0"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
-          MAX_JOBS: "3"
+          MAX_JOBS: "4"
           CMAKE_GENERATOR: "Ninja"
           TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
         run: |
@@ -746,7 +746,7 @@ jobs:
           USE_ROCM: "0"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
-          MAX_JOBS: "3"
+          MAX_JOBS: "4"
           CMAKE_GENERATOR: "Ninja"
           TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
           CMAKE_FRESH: "1"
@@ -759,7 +759,8 @@ jobs:
           $env:DESIRED_PYTHON = $pythonTag
           python -m build --wheel --no-isolation
 
-      - name: Collect built wheel
+      - id: collect-built-wheel
+        name: Collect built wheel
         shell: bash
         run: |
           python - <<'PY'
@@ -782,16 +783,27 @@ jobs:
               f"No wheel matching {expected_tag} found in pytorch-src/dist/: {found}"
             )
 
+          if len(matches) != 1:
+            found = ", ".join(wheel.name for wheel in matches)
+            raise SystemExit(
+              f"Expected exactly one wheel matching {expected_tag}, found {len(matches)}: {found}"
+            )
+
+          selected_wheel = matches[0]
+
           if target_dir.exists():
             shutil.rmtree(target_dir)
           target_dir.mkdir()
 
-          for wheel in matches:
-            shutil.copy2(wheel, target_dir / wheel.name)
+          copied_wheel = target_dir / selected_wheel.name
+          shutil.copy2(selected_wheel, copied_wheel)
 
-          print(f"Selected wheels for upload ({expected_tag}):")
-          for wheel in matches:
-            print(f" - {wheel.name}")
+          print(f"Selected wheel for upload ({expected_tag}): {selected_wheel.name}")
+
+          github_output = pathlib.Path(__import__('os').environ['GITHUB_OUTPUT'])
+          with github_output.open('a', encoding='utf-8') as fh:
+            fh.write(f"selected_wheel_name={selected_wheel.name}\n")
+            fh.write(f"selected_wheel_path={copied_wheel.as_posix()}\n")
           PY
           echo "Built wheels:"
           ls -lh dist/
@@ -825,7 +837,7 @@ jobs:
           BUILD_BACKEND: ${{ matrix.backend }}
         shell: bash
         run: |
-          WHEEL=$(ls dist/*.whl | head -1)
+          WHEEL="${{ steps.collect-built-wheel.outputs.selected_wheel_path }}"
           pip install --force-reinstall "$WHEEL"
           python -c "
           import os, torch
@@ -850,9 +862,9 @@ jobs:
           BUILD_BACKEND: ${{ matrix.backend }}
         shell: pwsh
         run: |
-          $wheel = Get-ChildItem -Path dist -Filter *.whl | Select-Object -First 1
-          if (-not $wheel) { throw "No wheel found in dist/" }
-          pip install --force-reinstall $wheel.FullName
+          $wheel = '${{ steps.collect-built-wheel.outputs.selected_wheel_path }}'
+          if (-not (Test-Path $wheel)) { throw "No wheel found at $wheel" }
+          pip install --force-reinstall $wheel
           python -c "
           import os, traceback
           try:
@@ -874,7 +886,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact_name }}
-          path: dist/*.whl
+          path: ${{ steps.collect-built-wheel.outputs.selected_wheel_path }}
           if-no-files-found: error
 
       - name: Show compiler cache stats
