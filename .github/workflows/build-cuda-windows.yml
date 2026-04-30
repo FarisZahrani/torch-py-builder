@@ -1,4 +1,4 @@
-name: Build PyTorch CUDA Family Wheels
+name: Build PyTorch CUDA Windows Wheels
 
 on:
   workflow_dispatch:
@@ -11,15 +11,6 @@ on:
         options:
           - "false"
           - "true"
-      target_os_filter:
-        description: Optional target OS filter for CUDA builds.
-        required: false
-        default: "any"
-        type: choice
-        options:
-          - any
-          - linux
-          - windows
       target_arch_filter:
         description: Optional target architecture filter.
         required: false
@@ -43,11 +34,11 @@ permissions:
   contents: write
 
 jobs:
-  build-cuda:
+  build-cuda-windows:
     uses: ./.github/workflows/build-cuda-shared.yml
     with:
       force_rebuild: ${{ inputs.force_rebuild }}
-      target_os_filter: ${{ inputs.target_os_filter }}
+      target_os_filter: windows
       target_arch_filter: ${{ inputs.target_arch_filter }}
       python_version_filter: ${{ inputs.python_version_filter }}
       release_tag: ${{ inputs.release_tag }}
