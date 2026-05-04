@@ -443,7 +443,32 @@ jobs:
           export Python_EXECUTABLE="$PYTHON_BIN"
           export Python3_EXECUTABLE="$PYTHON_BIN"
           export DESIRED_PYTHON="$PYTHON_TAG"
+          start_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "::notice::Starting Build libtorch (Linux CUDA) at ${start_time} | arch_list=${TORCH_CUDA_ARCH_LIST} | max_jobs=${MAX_JOBS}"
+
+          heartbeat() {
+            while true; do
+              sleep 300
+              now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+              build_size=$(du -sh build 2>/dev/null | cut -f1 || echo "n/a")
+              dist_size=$(du -sh dist 2>/dev/null | cut -f1 || echo "n/a")
+              echo "::notice::Heartbeat ${now} | phase=Build libtorch (Linux CUDA) | build_dir=${build_size} | dist_dir=${dist_size}"
+            done
+          }
+
+          heartbeat &
+          heartbeat_pid=$!
+          cleanup() {
+            kill "$heartbeat_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
           python tools/build_libtorch.py
+
+          cleanup
+          trap - EXIT
+          end_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "::notice::Completed Build libtorch (Linux CUDA) at ${end_time}"
 
       - name: Build wheel from libtorch (Linux CUDA)
         if: matrix.target_os == 'linux'
@@ -457,7 +482,6 @@ jobs:
           BUILD_TEST: "0"
           CUDA_HOME: ${{ steps.cuda_home.outputs.cuda_root }}
           TORCH_CUDA_ARCH_LIST: "5.0;6.0;7.0;7.5;8.0;8.6;8.9;9.0+PTX"
-          CMAKE_FRESH: "1"
         run: |
           export MAX_JOBS="${CUDA_MAX_JOBS:-4}"
           echo "MAX_JOBS=$MAX_JOBS"
@@ -467,7 +491,32 @@ jobs:
           export Python_EXECUTABLE="$PYTHON_BIN"
           export Python3_EXECUTABLE="$PYTHON_BIN"
           export DESIRED_PYTHON="$PYTHON_TAG"
+          start_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "::notice::Starting Build wheel from libtorch (Linux CUDA) at ${start_time} | arch_list=${TORCH_CUDA_ARCH_LIST} | max_jobs=${MAX_JOBS}"
+
+          heartbeat() {
+            while true; do
+              sleep 300
+              now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+              build_size=$(du -sh build 2>/dev/null | cut -f1 || echo "n/a")
+              dist_size=$(du -sh dist 2>/dev/null | cut -f1 || echo "n/a")
+              echo "::notice::Heartbeat ${now} | phase=Build wheel from libtorch (Linux CUDA) | build_dir=${build_size} | dist_dir=${dist_size}"
+            done
+          }
+
+          heartbeat &
+          heartbeat_pid=$!
+          cleanup() {
+            kill "$heartbeat_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
           python -m build --wheel --no-isolation
+
+          cleanup
+          trap - EXIT
+          end_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "::notice::Completed Build wheel from libtorch (Linux CUDA) at ${end_time}"
 
       - name: Trim PATH for Windows CUDA build
         if: matrix.target_os == 'windows'
@@ -501,7 +550,67 @@ jobs:
           $env:Python_EXECUTABLE = $pythonExe
           $env:Python3_EXECUTABLE = $pythonExe
           $env:DESIRED_PYTHON = $pythonTag
-          python tools/build_libtorch.py
+
+          function Get-DirectorySizeLabel([string]$Path) {
+            if (-not (Test-Path $Path)) { return 'n/a' }
+            $sum = (Get-ChildItem $Path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+            if (-not $sum) { return '0.00 GB' }
+            return ('{0:N2} GB' -f ($sum / 1GB))
+          }
+
+          function Invoke-LoggedPythonCommand([string]$Arguments, [string]$Label) {
+            $start = Get-Date
+            Write-Host "[$([DateTime]::UtcNow.ToString('s'))Z] Starting $Label | arch_list=$env:TORCH_CUDA_ARCH_LIST | max_jobs=$env:MAX_JOBS"
+
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = 'python'
+            $psi.Arguments = $Arguments
+            $psi.WorkingDirectory = (Get-Location).Path
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.CreateNoWindow = $true
+
+            $process = New-Object System.Diagnostics.Process
+            $process.StartInfo = $psi
+            $null = $process.Start()
+
+            $lastHeartbeat = Get-Date
+            while (-not $process.HasExited) {
+              while (-not $process.StandardOutput.EndOfStream) {
+                Write-Host $process.StandardOutput.ReadLine()
+              }
+              while (-not $process.StandardError.EndOfStream) {
+                Write-Host $process.StandardError.ReadLine()
+              }
+
+              if (((Get-Date) - $lastHeartbeat).TotalMinutes -ge 5) {
+                $now = [DateTime]::UtcNow.ToString('s') + 'Z'
+                $buildSize = Get-DirectorySizeLabel 'build'
+                $distSize = Get-DirectorySizeLabel 'dist'
+                Write-Host "[$now] Heartbeat $Label | build_dir=$buildSize | dist_dir=$distSize"
+                $lastHeartbeat = Get-Date
+              }
+
+              Start-Sleep -Seconds 5
+            }
+
+            while (-not $process.StandardOutput.EndOfStream) {
+              Write-Host $process.StandardOutput.ReadLine()
+            }
+            while (-not $process.StandardError.EndOfStream) {
+              Write-Host $process.StandardError.ReadLine()
+            }
+
+            if ($process.ExitCode -ne 0) {
+              throw "$Label failed with exit code $($process.ExitCode)"
+            }
+
+            $duration = (Get-Date) - $start
+            Write-Host "[$([DateTime]::UtcNow.ToString('s'))Z] Completed $Label in $([int]$duration.TotalMinutes)m $($duration.Seconds)s"
+          }
+
+          Invoke-LoggedPythonCommand 'tools/build_libtorch.py' 'Build libtorch (Windows CUDA)'
 
       - name: Build wheel from libtorch (Windows CUDA)
         if: matrix.target_os == 'windows'
@@ -514,7 +623,6 @@ jobs:
           BUILD_TEST: "0"
           CMAKE_GENERATOR: "Ninja"
           TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
-          CMAKE_FRESH: "1"
         run: |
           $env:MAX_JOBS = if ($env:CUDA_MAX_JOBS) { $env:CUDA_MAX_JOBS } else { '4' }
           Write-Host "MAX_JOBS=$env:MAX_JOBS"
@@ -524,7 +632,67 @@ jobs:
           $env:Python_EXECUTABLE = $pythonExe
           $env:Python3_EXECUTABLE = $pythonExe
           $env:DESIRED_PYTHON = $pythonTag
-          python -m build --wheel --no-isolation
+
+          function Get-DirectorySizeLabel([string]$Path) {
+            if (-not (Test-Path $Path)) { return 'n/a' }
+            $sum = (Get-ChildItem $Path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+            if (-not $sum) { return '0.00 GB' }
+            return ('{0:N2} GB' -f ($sum / 1GB))
+          }
+
+          function Invoke-LoggedPythonCommand([string]$Arguments, [string]$Label) {
+            $start = Get-Date
+            Write-Host "[$([DateTime]::UtcNow.ToString('s'))Z] Starting $Label | arch_list=$env:TORCH_CUDA_ARCH_LIST | max_jobs=$env:MAX_JOBS"
+
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = 'python'
+            $psi.Arguments = $Arguments
+            $psi.WorkingDirectory = (Get-Location).Path
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.CreateNoWindow = $true
+
+            $process = New-Object System.Diagnostics.Process
+            $process.StartInfo = $psi
+            $null = $process.Start()
+
+            $lastHeartbeat = Get-Date
+            while (-not $process.HasExited) {
+              while (-not $process.StandardOutput.EndOfStream) {
+                Write-Host $process.StandardOutput.ReadLine()
+              }
+              while (-not $process.StandardError.EndOfStream) {
+                Write-Host $process.StandardError.ReadLine()
+              }
+
+              if (((Get-Date) - $lastHeartbeat).TotalMinutes -ge 5) {
+                $now = [DateTime]::UtcNow.ToString('s') + 'Z'
+                $buildSize = Get-DirectorySizeLabel 'build'
+                $distSize = Get-DirectorySizeLabel 'dist'
+                Write-Host "[$now] Heartbeat $Label | build_dir=$buildSize | dist_dir=$distSize"
+                $lastHeartbeat = Get-Date
+              }
+
+              Start-Sleep -Seconds 5
+            }
+
+            while (-not $process.StandardOutput.EndOfStream) {
+              Write-Host $process.StandardOutput.ReadLine()
+            }
+            while (-not $process.StandardError.EndOfStream) {
+              Write-Host $process.StandardError.ReadLine()
+            }
+
+            if ($process.ExitCode -ne 0) {
+              throw "$Label failed with exit code $($process.ExitCode)"
+            }
+
+            $duration = (Get-Date) - $start
+            Write-Host "[$([DateTime]::UtcNow.ToString('s'))Z] Completed $Label in $([int]$duration.TotalMinutes)m $($duration.Seconds)s"
+          }
+
+          Invoke-LoggedPythonCommand '-m build --wheel --no-isolation' 'Build wheel from libtorch (Windows CUDA)'
 
       - id: collect-built-wheel
         name: Collect built wheel
