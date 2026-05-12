@@ -40,15 +40,1556 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-cuda:
-    uses: ./.github/workflows/build-cuda-shared.yml
-    with:
-      force_rebuild: ${{ inputs.force_rebuild }}
-      target_os_filter: ${{ inputs.target_os_filter }}
-      target_arch_filter: ${{ inputs.target_arch_filter }}
-      python_version_filter: ${{ inputs.python_version_filter }}
-      release_tag: ${{ inputs.release_tag }}
-    secrets: inherit
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.plan-phase.outputs.should_build }}
+      torch_version: ${{ steps.plan.outputs.torch_version }}
+      torchvision_version: ${{ steps.resolve-companions.outputs.torchvision_version }}
+      torchaudio_version: ${{ steps.resolve-companions.outputs.torchaudio_version }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      release_plan_json: ${{ steps.plan.outputs.release_plan_json }}
+      cuda_matrix: ${{ steps.plan-phase.outputs.cuda_matrix }}
+      cuda_matrix_has_entries: ${{ steps.plan-phase.outputs.cuda_matrix_has_entries }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - id: plan
+        shell: python
+        env:
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          state_path = Path("release-state/latest.json")
+          if not state_path.exists():
+              raise SystemExit(
+                  "release-state/latest.json does not exist. Run the CPU workflow first."
+              )
+
+          state = json.loads(state_path.read_text(encoding="utf-8"))
+          torch_version = state.get("torch_version", "")
+          if not torch_version:
+              raise SystemExit(
+                  "release-state/latest.json is missing torch_version. Run the CPU workflow first."
+              )
+
+          release_tag_input = os.environ.get("RELEASE_TAG_INPUT", "").strip()
+          force_rebuild = os.environ.get("FORCE_REBUILD", "false").lower() == "true"
+          release_tag = release_tag_input or state.get("release_tag") or f"torch-{torch_version}"
+
+          plan = {
+              "should_build": True,
+              "torch_version": torch_version,
+              "previous_version": state.get("previous_version", torch_version),
+              "release_tag": release_tag,
+              "release_reason": "forced" if force_rebuild else "cuda-followup",
+          }
+
+          Path("release-plan.json").write_text(
+              json.dumps(plan, indent=2) + "\n", encoding="utf-8"
+          )
+          print(json.dumps(plan, indent=2))
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"torch_version={torch_version}\n")
+              fh.write(f"release_tag={release_tag}\n")
+              fh.write(f"release_plan_json={json.dumps(plan)}\n")
+
+      - id: resolve-companions
+        run: |
+          set -euo pipefail
+
+          python scripts/resolve_companion_versions.py \
+            --torch-version "${{ steps.plan.outputs.torch_version }}" \
+            --output companion-versions.json
+
+          cat companion-versions.json
+          echo "torchvision_version=$(jq -r '.torchvision_version' companion-versions.json)" >> "$GITHUB_OUTPUT"
+          echo "torchaudio_version=$(jq -r '.torchaudio_version' companion-versions.json)" >> "$GITHUB_OUTPUT"
+
+      - id: make-matrix
+        env:
+          TARGET_OS_FILTER: ${{ inputs.target_os_filter }}
+          TARGET_ARCH_FILTER: ${{ inputs.target_arch_filter }}
+          PYTHON_VERSION_FILTER: ${{ inputs.python_version_filter }}
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          matrix_config = json.loads(Path("config/build_matrix.json").read_text(encoding="utf-8"))
+          plan = json.loads(Path("release-plan.json").read_text(encoding="utf-8"))
+          companion_versions = json.loads(Path("companion-versions.json").read_text(encoding="utf-8"))
+
+          torch_version = plan["torch_version"]
+          torchvision_version = companion_versions["torchvision_version"]
+          torchaudio_version = companion_versions["torchaudio_version"]
+          python_versions = matrix_config["python_versions"]
+          targets = matrix_config["targets"]
+
+          target_os_filter = os.environ.get("TARGET_OS_FILTER", "any").strip().lower() or "any"
+          target_arch_filter = os.environ.get("TARGET_ARCH_FILTER", "any").strip().lower() or "any"
+          python_version_filter = os.environ.get("PYTHON_VERSION_FILTER", "").strip()
+
+          valid_os = {"any", "linux", "windows"}
+          valid_arch = {"any", "x86_64"}
+          if target_os_filter not in valid_os:
+              raise SystemExit(f"Invalid target_os_filter: {target_os_filter}")
+          if target_arch_filter not in valid_arch:
+              raise SystemExit(f"Invalid target_arch_filter: {target_arch_filter}")
+
+          include = []
+          for target in targets:
+              if target.get("backend") != "cuda":
+                  continue
+              if target_os_filter != "any" and target["target_os"] != target_os_filter:
+                  continue
+              if target_arch_filter != "any" and target["target_arch"] != target_arch_filter:
+                  continue
+              for py_version in python_versions:
+                  if python_version_filter and py_version != python_version_filter:
+                      continue
+                  py_nodot = py_version.replace(".", "")
+                  backend = target.get("backend", "cpu")
+                  include.append(
+                      {
+                          "torch_version": torch_version,
+                          "torchvision_version": torchvision_version,
+                          "torchaudio_version": torchaudio_version,
+                          "python_version": py_version,
+                          "artifact_name": (
+                              f"torch-{torch_version}-py{py_nodot}"
+                              f"-{target['target_os']}-{target['target_arch']}-{backend}"
+                          ),
+                          "torchvision_artifact_name": (
+                              f"torchvision-{torchvision_version}-py{py_nodot}"
+                              f"-{target['target_os']}-{target['target_arch']}-{backend}"
+                          ),
+                          "torchaudio_artifact_name": (
+                              f"torchaudio-{torchaudio_version}-py{py_nodot}"
+                              f"-{target['target_os']}-{target['target_arch']}-{backend}"
+                          ),
+                          **target,
+                      }
+                  )
+
+          matrix = {"include": include}
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"matrix={json.dumps(matrix)}\n")
+
+      - id: inspect-release-assets
+        if: steps.plan.outputs.release_tag != ''
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const tag = '${{ steps.plan.outputs.release_tag }}'
+            try {
+              const release = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              })
+              const assetNames = release.data.assets.map((asset) => asset.name)
+              core.setOutput('asset_names_json', JSON.stringify(assetNames))
+            } catch (error) {
+              if (error.status === 404) {
+                core.setOutput('asset_names_json', '[]')
+                return
+              }
+              throw error
+            }
+
+      - id: plan-phase
+        shell: python
+        env:
+          CANDIDATE_MATRIX: ${{ steps.make-matrix.outputs.matrix }}
+          RELEASE_ASSET_NAMES_JSON: ${{ steps.inspect-release-assets.outputs.asset_names_json }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
+        run: |
+          import json
+          import os
+
+          candidate_matrix = json.loads(os.environ.get("CANDIDATE_MATRIX") or '{"include": []}')
+          release_asset_names = set(json.loads(os.environ.get("RELEASE_ASSET_NAMES_JSON") or "[]"))
+          force_rebuild = os.environ.get("FORCE_REBUILD", "false").lower() == "true"
+
+          if force_rebuild:
+              cuda_matrix = candidate_matrix
+          else:
+              filtered = []
+              for entry in candidate_matrix.get("include", []):
+                  expected_assets = {
+                      entry["artifact_name"],
+                      entry["torchvision_artifact_name"],
+                      entry["torchaudio_artifact_name"],
+                  }
+                  if not expected_assets.issubset(release_asset_names):
+                      filtered.append(entry)
+              cuda_matrix = {"include": filtered}
+
+          should_build = bool(cuda_matrix["include"])
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"should_build={'true' if should_build else 'false'}\n")
+              fh.write(f"cuda_matrix={json.dumps(cuda_matrix)}\n")
+              fh.write(
+                  f"cuda_matrix_has_entries={'true' if cuda_matrix['include'] else 'false'}\n"
+              )
+
+  validate-scripts:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Verify Python scripts compile
+        run: python -m compileall scripts
+
+      - name: Smoke test script CLIs
+        run: |
+          python scripts/resolve_companion_versions.py --help
+          python scripts/plan_release.py --help
+          python scripts/update_release_state.py --help
+          python scripts/validate_wheel.py --help
+
+  build:
+    needs: [check-upstream, validate-scripts]
+    if: needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cuda_matrix_has_entries == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.check-upstream.outputs.cuda_matrix) }}
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+      USE_RELATIVE_PATHS: "1"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      CMAKE_CUDA_COMPILER_LAUNCHER: sccache
+      PYTORCH_BUILD_VERSION: ${{ matrix.torch_version }}
+      PYTORCH_BUILD_NUMBER: "1"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Linux)
+        if: matrix.target_os == 'linux'
+        run: |
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          df -h
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: Install build dependencies (Linux)
+        if: matrix.target_os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build build-essential \
+            libopenblas-dev libomp-dev
+
+      - name: Install build dependencies (Windows)
+        if: matrix.target_os == 'windows'
+        shell: pwsh
+        run: |
+          choco install cmake ninja -y
+          echo "C:\Program Files\CMake\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
+
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Show compiler cache configuration
+        shell: bash
+        run: |
+          echo "sccache path: $SCCACHE_PATH"
+          "$SCCACHE_PATH" --show-stats || true
+
+      - name: Set up MSVC (Windows)
+        if: matrix.target_os == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.29
+        with:
+          cuda: '12.4.1'
+          method: 'network'
+
+      - name: Discover CUDA home (Linux CUDA)
+        if: matrix.target_os == 'linux'
+        id: cuda_home
+        shell: bash
+        run: |
+          set -euo pipefail
+          cuda_root=""
+          for candidate in "${CUDA_PATH:-}" "${CUDA_HOME:-}"; do
+            if [ -n "$candidate" ] && [ -d "$candidate" ]; then
+              cuda_root="$candidate"
+              break
+            fi
+          done
+          if [ -z "$cuda_root" ] && command -v nvcc >/dev/null 2>&1; then
+            cuda_root="$(cd "$(dirname "$(command -v nvcc)")/.."; pwd)"
+          fi
+          if [ -z "$cuda_root" ]; then
+            for candidate in /usr/local/cuda /usr/local/cuda-* /opt/cuda; do
+              if [ -d "$candidate" ]; then cuda_root="$candidate"; break; fi
+            done
+          fi
+          if [ -z "$cuda_root" ]; then
+            echo "Could not determine CUDA root" >&2
+            exit 1
+          fi
+          echo "cuda_root=$cuda_root" >> "$GITHUB_OUTPUT"
+          echo "Using CUDA root: $cuda_root"
+
+      - name: Enable long paths (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: git config --global core.longpaths true
+
+      - name: Clone PyTorch source
+        shell: bash
+        run: |
+          git clone \
+            --branch "v${{ matrix.torch_version }}" \
+            --depth 1 \
+            https://github.com/pytorch/pytorch \
+            pytorch-src
+
+      - name: Initialize submodules
+        shell: bash
+        working-directory: pytorch-src
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth 1 --jobs 4
+
+      - name: Install PyTorch build requirements
+        shell: bash
+        working-directory: pytorch-src
+        run: |
+          python -m pip install --upgrade pip
+          pip install "cmake<4" ninja build wheel
+          pip install -r requirements.txt
+
+      - name: Prepend pip cmake to PATH
+        shell: bash
+        run: |
+          CMAKE_BIN=$(python -c "import cmake, os; print(os.path.join(os.path.dirname(cmake.__file__), 'data', 'bin'))")
+          echo "$CMAKE_BIN" >> "$GITHUB_PATH"
+
+      - name: Reduce allocator fragmentation (Linux CUDA)
+        if: matrix.target_os == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          jemalloc_lib="$(find /usr/lib* -name 'libjemalloc.so.2' 2>/dev/null | head -1 || true)"
+          if [ -n "$jemalloc_lib" ]; then
+            echo "LD_PRELOAD=$jemalloc_lib" >> "$GITHUB_ENV"
+            echo "Using jemalloc: $jemalloc_lib"
+          else
+            echo "jemalloc not found; continuing without it"
+          fi
+
+      - name: Detect build parallelism (Linux)
+        if: matrix.target_os == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          jobs="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+          echo "CUDA_MAX_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "Using MAX_JOBS=$jobs"
+
+      - name: Detect build parallelism (Windows)
+        if: matrix.target_os == 'windows'
+        shell: pwsh
+        run: |
+          $jobs = [Environment]::ProcessorCount
+          if (-not $jobs -or $jobs -lt 1) { $jobs = 4 }
+          "CUDA_MAX_JOBS=$jobs" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          Write-Host "Using MAX_JOBS=$jobs"
+
+      - name: Build libtorch (Linux CUDA)
+        if: matrix.target_os == 'linux'
+        working-directory: pytorch-src
+        env:
+          USE_CUDA: "1"
+          USE_ROCM: "0"
+          USE_MKLDNN: "1"
+          USE_NUMPY: "1"
+          USE_DISTRIBUTED: "0"
+          BUILD_TEST: "0"
+          CUDA_HOME: ${{ steps.cuda_home.outputs.cuda_root }}
+          TORCH_CUDA_ARCH_LIST: "5.0;6.0;7.0;7.5;8.0;8.6;8.9;9.0+PTX"
+        run: |
+          export MAX_JOBS="${CUDA_MAX_JOBS:-4}"
+          echo "MAX_JOBS=$MAX_JOBS"
+          PYTHON_BIN=$(python -c "import sys; print(sys.executable)")
+          PYTHON_TAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          export PYTHON_EXECUTABLE="$PYTHON_BIN"
+          export Python_EXECUTABLE="$PYTHON_BIN"
+          export Python3_EXECUTABLE="$PYTHON_BIN"
+          export DESIRED_PYTHON="$PYTHON_TAG"
+          start_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "::notice::Starting Build libtorch (Linux CUDA) at ${start_time} | arch_list=${TORCH_CUDA_ARCH_LIST} | max_jobs=${MAX_JOBS}"
+
+          heartbeat() {
+            while true; do
+              sleep 300
+              now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+              build_size=$(du -sh build 2>/dev/null | cut -f1 || echo "n/a")
+              dist_size=$(du -sh dist 2>/dev/null | cut -f1 || echo "n/a")
+              echo "::notice::Heartbeat ${now} | phase=Build libtorch (Linux CUDA) | build_dir=${build_size} | dist_dir=${dist_size}"
+            done
+          }
+
+          heartbeat &
+          heartbeat_pid=$!
+          cleanup() {
+            kill "$heartbeat_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          python tools/build_libtorch.py
+
+          cleanup
+          trap - EXIT
+          end_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "::notice::Completed Build libtorch (Linux CUDA) at ${end_time}"
+
+      - name: Build wheel from libtorch (Linux CUDA)
+        if: matrix.target_os == 'linux'
+        working-directory: pytorch-src
+        env:
+          USE_CUDA: "1"
+          USE_ROCM: "0"
+          USE_MKLDNN: "1"
+          USE_NUMPY: "1"
+          USE_DISTRIBUTED: "0"
+          BUILD_TEST: "0"
+          CUDA_HOME: ${{ steps.cuda_home.outputs.cuda_root }}
+          TORCH_CUDA_ARCH_LIST: "5.0;6.0;7.0;7.5;8.0;8.6;8.9;9.0+PTX"
+        run: |
+          export MAX_JOBS="${CUDA_MAX_JOBS:-4}"
+          echo "MAX_JOBS=$MAX_JOBS"
+          PYTHON_BIN=$(python -c "import sys; print(sys.executable)")
+          PYTHON_TAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          export PYTHON_EXECUTABLE="$PYTHON_BIN"
+          export Python_EXECUTABLE="$PYTHON_BIN"
+          export Python3_EXECUTABLE="$PYTHON_BIN"
+          export DESIRED_PYTHON="$PYTHON_TAG"
+          start_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "::notice::Starting Build wheel from libtorch (Linux CUDA) at ${start_time} | arch_list=${TORCH_CUDA_ARCH_LIST} | max_jobs=${MAX_JOBS}"
+
+          heartbeat() {
+            while true; do
+              sleep 300
+              now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+              build_size=$(du -sh build 2>/dev/null | cut -f1 || echo "n/a")
+              dist_size=$(du -sh dist 2>/dev/null | cut -f1 || echo "n/a")
+              echo "::notice::Heartbeat ${now} | phase=Build wheel from libtorch (Linux CUDA) | build_dir=${build_size} | dist_dir=${dist_size}"
+            done
+          }
+
+          heartbeat &
+          heartbeat_pid=$!
+          cleanup() {
+            kill "$heartbeat_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          python -m build --wheel --no-isolation
+
+          cleanup
+          trap - EXIT
+          end_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "::notice::Completed Build wheel from libtorch (Linux CUDA) at ${end_time}"
+
+      - name: Trim PATH for Windows CUDA build
+        if: matrix.target_os == 'windows'
+        shell: pwsh
+        run: |
+          $trimmed = ($env:PATH -split ';' | Select-Object -Unique | Where-Object {
+            $_ -ne '' -and
+            $_ -notmatch '\\Microsoft Visual Studio\\' -and
+            $_ -notmatch '\\MSBuild\\' -and
+            $_ -notmatch '\\Common7\\'
+          }) -join ';'
+          "PATH=$trimmed" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build libtorch (Windows CUDA)
+        if: matrix.target_os == 'windows'
+        working-directory: pytorch-src
+        shell: pwsh
+        env:
+          USE_CUDA: "1"
+          USE_ROCM: "0"
+          USE_NUMPY: "1"
+          BUILD_TEST: "0"
+          CMAKE_GENERATOR: "Ninja"
+          TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
+        run: |
+          $env:MAX_JOBS = if ($env:CUDA_MAX_JOBS) { $env:CUDA_MAX_JOBS } else { '4' }
+          Write-Host "MAX_JOBS=$env:MAX_JOBS"
+          $pythonExe = python -c "import sys; print(sys.executable)"
+          $pythonTag = python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"
+          $env:PYTHON_EXECUTABLE = $pythonExe
+          $env:Python_EXECUTABLE = $pythonExe
+          $env:Python3_EXECUTABLE = $pythonExe
+          $env:DESIRED_PYTHON = $pythonTag
+
+          function Get-DirectorySizeLabel([string]$Path) {
+            if (-not (Test-Path $Path)) { return 'n/a' }
+            $sum = (Get-ChildItem $Path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+            if (-not $sum) { return '0.00 GB' }
+            return ('{0:N2} GB' -f ($sum / 1GB))
+          }
+
+          function Invoke-LoggedPythonCommand([string]$Arguments, [string]$Label) {
+            $start = Get-Date
+            Write-Host "[$([DateTime]::UtcNow.ToString('s'))Z] Starting $Label | arch_list=$env:TORCH_CUDA_ARCH_LIST | max_jobs=$env:MAX_JOBS"
+
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = 'python'
+            $psi.Arguments = $Arguments
+            $psi.WorkingDirectory = (Get-Location).Path
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.CreateNoWindow = $true
+
+            $process = New-Object System.Diagnostics.Process
+            $process.StartInfo = $psi
+            $null = $process.Start()
+
+            $lastHeartbeat = Get-Date
+            while (-not $process.HasExited) {
+              while (-not $process.StandardOutput.EndOfStream) {
+                Write-Host $process.StandardOutput.ReadLine()
+              }
+              while (-not $process.StandardError.EndOfStream) {
+                Write-Host $process.StandardError.ReadLine()
+              }
+
+              if (((Get-Date) - $lastHeartbeat).TotalMinutes -ge 5) {
+                $now = [DateTime]::UtcNow.ToString('s') + 'Z'
+                $buildSize = Get-DirectorySizeLabel 'build'
+                $distSize = Get-DirectorySizeLabel 'dist'
+                Write-Host "[$now] Heartbeat $Label | build_dir=$buildSize | dist_dir=$distSize"
+                $lastHeartbeat = Get-Date
+              }
+
+              Start-Sleep -Seconds 5
+            }
+
+            while (-not $process.StandardOutput.EndOfStream) {
+              Write-Host $process.StandardOutput.ReadLine()
+            }
+            while (-not $process.StandardError.EndOfStream) {
+              Write-Host $process.StandardError.ReadLine()
+            }
+
+            if ($process.ExitCode -ne 0) {
+              throw "$Label failed with exit code $($process.ExitCode)"
+            }
+
+            $duration = (Get-Date) - $start
+            Write-Host "[$([DateTime]::UtcNow.ToString('s'))Z] Completed $Label in $([int]$duration.TotalMinutes)m $($duration.Seconds)s"
+          }
+
+          Invoke-LoggedPythonCommand 'tools/build_libtorch.py' 'Build libtorch (Windows CUDA)'
+
+      - name: Build wheel from libtorch (Windows CUDA)
+        if: matrix.target_os == 'windows'
+        working-directory: pytorch-src
+        shell: pwsh
+        env:
+          USE_CUDA: "1"
+          USE_ROCM: "0"
+          USE_NUMPY: "1"
+          BUILD_TEST: "0"
+          CMAKE_GENERATOR: "Ninja"
+          TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
+        run: |
+          $env:MAX_JOBS = if ($env:CUDA_MAX_JOBS) { $env:CUDA_MAX_JOBS } else { '4' }
+          Write-Host "MAX_JOBS=$env:MAX_JOBS"
+          $pythonExe = python -c "import sys; print(sys.executable)"
+          $pythonTag = python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"
+          $env:PYTHON_EXECUTABLE = $pythonExe
+          $env:Python_EXECUTABLE = $pythonExe
+          $env:Python3_EXECUTABLE = $pythonExe
+          $env:DESIRED_PYTHON = $pythonTag
+
+          function Get-DirectorySizeLabel([string]$Path) {
+            if (-not (Test-Path $Path)) { return 'n/a' }
+            $sum = (Get-ChildItem $Path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+            if (-not $sum) { return '0.00 GB' }
+            return ('{0:N2} GB' -f ($sum / 1GB))
+          }
+
+          function Invoke-LoggedPythonCommand([string]$Arguments, [string]$Label) {
+            $start = Get-Date
+            Write-Host "[$([DateTime]::UtcNow.ToString('s'))Z] Starting $Label | arch_list=$env:TORCH_CUDA_ARCH_LIST | max_jobs=$env:MAX_JOBS"
+
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = 'python'
+            $psi.Arguments = $Arguments
+            $psi.WorkingDirectory = (Get-Location).Path
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.CreateNoWindow = $true
+
+            $process = New-Object System.Diagnostics.Process
+            $process.StartInfo = $psi
+            $null = $process.Start()
+
+            $lastHeartbeat = Get-Date
+            while (-not $process.HasExited) {
+              while (-not $process.StandardOutput.EndOfStream) {
+                Write-Host $process.StandardOutput.ReadLine()
+              }
+              while (-not $process.StandardError.EndOfStream) {
+                Write-Host $process.StandardError.ReadLine()
+              }
+
+              if (((Get-Date) - $lastHeartbeat).TotalMinutes -ge 5) {
+                $now = [DateTime]::UtcNow.ToString('s') + 'Z'
+                $buildSize = Get-DirectorySizeLabel 'build'
+                $distSize = Get-DirectorySizeLabel 'dist'
+                Write-Host "[$now] Heartbeat $Label | build_dir=$buildSize | dist_dir=$distSize"
+                $lastHeartbeat = Get-Date
+              }
+
+              Start-Sleep -Seconds 5
+            }
+
+            while (-not $process.StandardOutput.EndOfStream) {
+              Write-Host $process.StandardOutput.ReadLine()
+            }
+            while (-not $process.StandardError.EndOfStream) {
+              Write-Host $process.StandardError.ReadLine()
+            }
+
+            if ($process.ExitCode -ne 0) {
+              throw "$Label failed with exit code $($process.ExitCode)"
+            }
+
+            $duration = (Get-Date) - $start
+            Write-Host "[$([DateTime]::UtcNow.ToString('s'))Z] Completed $Label in $([int]$duration.TotalMinutes)m $($duration.Seconds)s"
+          }
+
+          Invoke-LoggedPythonCommand '-m build --wheel --no-isolation' 'Build wheel from libtorch (Windows CUDA)'
+
+      - id: collect-built-wheel
+        name: Collect built wheel
+        shell: bash
+        run: |
+          python - <<'PY'
+          import pathlib
+          import shutil
+
+          source_dir = pathlib.Path("pytorch-src/dist")
+          target_dir = pathlib.Path("dist")
+          expected_tag = "cp${{ matrix.python_version }}".replace(".", "")
+
+          all_wheels = sorted(source_dir.glob("*.whl"))
+          if not all_wheels:
+            raise SystemExit("No wheel found in pytorch-src/dist/")
+
+          matches = [wheel for wheel in all_wheels if expected_tag in wheel.name]
+          if not matches:
+            found = ", ".join(wheel.name for wheel in all_wheels)
+            raise SystemExit(
+              f"No wheel matching {expected_tag} found in pytorch-src/dist/: {found}"
+            )
+
+          if len(matches) != 1:
+            found = ", ".join(wheel.name for wheel in matches)
+            raise SystemExit(
+              f"Expected exactly one wheel matching {expected_tag}, found {len(matches)}: {found}"
+            )
+
+          selected_wheel = matches[0]
+
+          if target_dir.exists():
+            shutil.rmtree(target_dir)
+          target_dir.mkdir()
+
+          copied_wheel = target_dir / selected_wheel.name
+          shutil.copy2(selected_wheel, copied_wheel)
+
+          print(f"Selected wheel for upload ({expected_tag}): {selected_wheel.name}")
+
+          github_output = pathlib.Path(__import__('os').environ['GITHUB_OUTPUT'])
+          with github_output.open('a', encoding='utf-8') as fh:
+            fh.write(f"selected_wheel_name={selected_wheel.name}\n")
+            fh.write(f"selected_wheel_path={copied_wheel.as_posix()}\n")
+          PY
+          echo "Built wheels:"
+          ls -lh dist/
+
+      - name: Verify built wheel tag
+        shell: bash
+        run: |
+          python - <<'PY'
+          import pathlib
+
+          wheels = sorted(pathlib.Path("dist").glob("*.whl"))
+          if not wheels:
+              raise SystemExit("No wheel found in dist/")
+
+          expected_tag = "cp${{ matrix.python_version }}".replace(".", "")
+          for wheel in wheels:
+            if expected_tag not in wheel.name:
+              raise SystemExit(
+                f"Wheel tag mismatch: expected {expected_tag} in {wheel.name}"
+              )
+
+          print("Verified wheel tags:")
+          for wheel in wheels:
+            print(f" - {wheel.name}")
+          PY
+
+      - name: Validate built wheel (Linux)
+        if: matrix.target_os == 'linux'
+        shell: bash
+        run: |
+          WHEEL="${{ steps.collect-built-wheel.outputs.selected_wheel_path }}"
+          pip install --force-reinstall "$WHEEL"
+          python -c "
+          import torch
+          print(f'torch version: {torch.__version__}')
+          t = torch.ones(2, 2)
+          assert t.sum().item() == 4.0, 'tensor sum check failed'
+          linear = torch.nn.Linear(2, 2)
+          out = linear(t)
+          print(f'nn.Linear output shape: {out.shape}')
+          assert torch.version.cuda is not None, 'Expected CUDA build but torch.version.cuda is None'
+          print(f'CUDA compiled version: {torch.version.cuda}')
+          print('smoke-ok')
+          "
+
+      - name: Validate built wheel (Windows)
+        if: matrix.target_os == 'windows'
+        shell: pwsh
+        run: |
+          $wheel = '${{ steps.collect-built-wheel.outputs.selected_wheel_path }}'
+          if (-not (Test-Path $wheel)) { throw "No wheel found at $wheel" }
+          pip install --force-reinstall $wheel
+          python -c "
+          import traceback
+          try:
+              import torch
+              print(f'torch version: {torch.__version__}')
+              t = torch.ones(2, 2)
+              assert t.sum().item() == 4.0
+              assert torch.version.cuda is not None, 'Expected CUDA build but torch.version.cuda is None'
+              print(f'CUDA compiled version: {torch.version.cuda}')
+              print('smoke-ok')
+          except Exception:
+              traceback.print_exc()
+              raise
+          "
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ steps.collect-built-wheel.outputs.selected_wheel_path }}
+          if-no-files-found: error
+
+      - name: Show compiler cache stats
+        if: always()
+        shell: bash
+        run: |
+          "$SCCACHE_PATH" --show-stats || true
+
+  validate-artifacts:
+    needs: [check-upstream, build]
+    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cuda_matrix_has_entries == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.check-upstream.outputs.cuda_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - id: artifact-check
+        name: Check wheel artifact presence
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const artifactName = '${{ matrix.artifact_name }}';
+            const artifacts = await github.paginate(
+              github.rest.actions.listWorkflowRunArtifacts,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId,
+                per_page: 100,
+              }
+            );
+            const artifact = artifacts.find((item) => item.name === artifactName);
+            core.setOutput('exists', artifact ? 'true' : 'false');
+
+      - name: Download built wheel
+        if: steps.artifact-check.outputs.exists == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist-artifact
+
+      - name: Validate wheel structure
+        if: steps.artifact-check.outputs.exists == 'true'
+        shell: bash
+        run: |
+          WHEEL=$(ls dist-artifact/*.whl | head -1)
+          python scripts/validate_wheel.py "$WHEEL" \
+            --expected-version "${{ matrix.torch_version }}"
+
+      - name: Fail when expected artifact is missing
+        if: steps.artifact-check.outputs.exists != 'true'
+        shell: bash
+        run: |
+          echo "Missing build artifact for ${{ matrix.artifact_name }}."
+          echo "A corresponding CUDA build matrix job failed or timed out before upload."
+          exit 1
+
+  build-torchvision:
+    needs: [check-upstream, build]
+    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cuda_matrix_has_entries == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.check-upstream.outputs.cuda_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: Install build dependencies (Linux)
+        if: matrix.target_os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build build-essential \
+            libjpeg-dev libpng-dev libwebp-dev \
+            libopenblas-dev
+
+      - name: Install build dependencies (Windows)
+        if: matrix.target_os == 'windows'
+        shell: pwsh
+        run: |
+          choco install cmake ninja -y
+          echo "C:\Program Files\CMake\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
+
+      - name: Set up MSVC (Windows)
+        if: matrix.target_os == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.29
+        with:
+          cuda: '12.4.1'
+          method: 'network'
+
+      - name: Discover CUDA home (Linux CUDA)
+        if: matrix.target_os == 'linux'
+        id: torchvision_cuda_home
+        shell: bash
+        run: |
+          set -euo pipefail
+          cuda_root=""
+          for candidate in "${CUDA_PATH:-}" "${CUDA_HOME:-}"; do
+            if [ -n "$candidate" ] && [ -d "$candidate" ]; then
+              cuda_root="$candidate"
+              break
+            fi
+          done
+          if [ -z "$cuda_root" ] && command -v nvcc >/dev/null 2>&1; then
+            cuda_root="$(cd "$(dirname "$(command -v nvcc)")/.."; pwd)"
+          fi
+          if [ -z "$cuda_root" ]; then
+            echo "Could not determine CUDA root" >&2
+            exit 1
+          fi
+          echo "cuda_root=$cuda_root" >> "$GITHUB_OUTPUT"
+
+      - id: torch-artifact-check
+        name: Check built torch wheel presence
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const artifactName = '${{ matrix.artifact_name }}';
+            const artifacts = await github.paginate(
+              github.rest.actions.listWorkflowRunArtifacts,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId,
+                per_page: 100,
+              }
+            );
+            const artifact = artifacts.find((item) => item.name === artifactName);
+            core.setOutput('exists', artifact ? 'true' : 'false');
+
+      - name: Download built torch wheel
+        if: steps.torch-artifact-check.outputs.exists == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist-torch
+
+      - name: Fail when built torch wheel is missing
+        if: steps.torch-artifact-check.outputs.exists != 'true'
+        shell: bash
+        run: |
+          echo "Missing torch artifact for ${{ matrix.artifact_name }}."
+          echo "torchvision cannot be built for this CUDA matrix entry without the matching torch wheel."
+          exit 1
+
+      - name: Install built torch wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          WHEEL=$(python - <<'PY'
+          import pathlib
+          import sys
+
+          wheel_dir = pathlib.Path('dist-torch')
+          expected_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+          wheels = sorted(wheel_dir.glob('*.whl'))
+          matches = [wheel for wheel in wheels if expected_tag in wheel.name]
+
+          if not matches:
+            found = ', '.join(wheel.name for wheel in wheels) or '<none>'
+            raise SystemExit(
+              f"No torch wheel matching {expected_tag} found in dist-torch/: {found}"
+            )
+
+          print(matches[0])
+          PY
+          )
+          echo "Installing torch wheel: $WHEEL"
+          pip install --force-reinstall "$WHEEL"
+
+      - id: installed_torch_version
+        name: Capture installed torch version
+        shell: bash
+        run: |
+          TORCH_VERSION=$(python - <<'PY'
+          import torch
+          print(torch.__version__)
+          PY
+          )
+          echo "Detected installed torch version: $TORCH_VERSION"
+          echo "value=$TORCH_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Clone torchvision source
+        shell: bash
+        run: |
+          git clone \
+            --branch "v${{ matrix.torchvision_version }}" \
+            --depth 1 \
+            https://github.com/pytorch/vision \
+            vision-src
+
+      - name: Install torchvision build requirements
+        shell: bash
+        working-directory: vision-src
+        run: |
+          pip install "cmake<4" ninja numpy pillow "setuptools<82" wheel
+
+      - name: Trim PATH for Windows CUDA build
+        if: matrix.target_os == 'windows'
+        shell: pwsh
+        run: |
+          $trimmed = ($env:PATH -split ';' | Select-Object -Unique | Where-Object {
+            $_ -ne '' -and
+            $_ -notmatch '\\Microsoft Visual Studio\\' -and
+            $_ -notmatch '\\MSBuild\\' -and
+            $_ -notmatch '\\Common7\\'
+          }) -join ';'
+          "PATH=$trimmed" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build torchvision wheel (Linux)
+        if: matrix.target_os == 'linux'
+        shell: bash
+        working-directory: vision-src
+        env:
+          BUILD_VERSION: ${{ matrix.torchvision_version }}
+          PYTORCH_VERSION: ${{ steps.installed_torch_version.outputs.value }}
+          CUDA_HOME: ${{ steps.torchvision_cuda_home.outputs.cuda_root }}
+          SETUPTOOLS_USE_DISTUTILS: local
+        run: |
+          export FORCE_CUDA=1
+          python setup.py bdist_wheel
+
+      - name: Build torchvision wheel (Windows)
+        if: matrix.target_os == 'windows'
+        shell: pwsh
+        working-directory: vision-src
+        env:
+          BUILD_VERSION: ${{ matrix.torchvision_version }}
+          PYTORCH_VERSION: ${{ steps.installed_torch_version.outputs.value }}
+          DISTUTILS_USE_SDK: "1"
+          SETUPTOOLS_USE_DISTUTILS: local
+        run: |
+          $env:FORCE_CUDA = '1'
+          if ($env:CUDA_PATH) {
+            $env:CUDA_HOME = $env:CUDA_PATH
+          }
+          python setup.py bdist_wheel
+
+      - name: Collect built wheel
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp vision-src/dist/*.whl dist/
+          ls -lh dist/
+
+      - name: Validate built wheel (Linux)
+        if: matrix.target_os == 'linux'
+        shell: bash
+        run: |
+          WHEEL=$(ls dist/*.whl | head -1)
+          pip install --force-reinstall --no-deps "$WHEEL"
+          python -c "
+          import torch, torchvision
+          print(f'torchvision version: {torchvision.__version__}')
+          boxes = torch.tensor([[0.0, 0.0, 10.0, 10.0], [1.0, 1.0, 9.0, 9.0]])
+          scores = torch.tensor([0.9, 0.8])
+          keep = torchvision.ops.nms(boxes, scores, 0.5)
+          print(f'nms keep: {keep.tolist()}')
+          cuda_version = torch.ops.torchvision._cuda_version()
+          assert cuda_version != -1, 'Expected torchvision CUDA ops to be built'
+          print(f'torchvision cuda version: {cuda_version}')
+          print('smoke-ok')
+          "
+
+      - name: Validate built wheel (Windows)
+        if: matrix.target_os == 'windows'
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem -Path dist -Filter *.whl | Select-Object -First 1
+          if (-not $wheel) { throw "No wheel found in dist/" }
+          pip install --force-reinstall --no-deps $wheel.FullName
+          python -c "
+          import traceback
+          try:
+              import torch, torchvision
+              print(f'torchvision version: {torchvision.__version__}')
+              boxes = torch.tensor([[0.0, 0.0, 10.0, 10.0], [1.0, 1.0, 9.0, 9.0]])
+              scores = torch.tensor([0.9, 0.8])
+              keep = torchvision.ops.nms(boxes, scores, 0.5)
+              print(f'nms keep: {keep.tolist()}')
+              cuda_version = torch.ops.torchvision._cuda_version()
+              assert cuda_version != -1, 'Expected torchvision CUDA ops to be built'
+              print(f'torchvision cuda version: {cuda_version}')
+              print('smoke-ok')
+          except Exception:
+              traceback.print_exc()
+              raise
+          "
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.torchvision_artifact_name }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  build-torchaudio:
+    needs: [check-upstream, build]
+    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cuda_matrix_has_entries == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.check-upstream.outputs.cuda_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: Install build dependencies (Linux)
+        if: matrix.target_os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build build-essential \
+            libopenblas-dev
+
+      - name: Install build dependencies (Windows)
+        if: matrix.target_os == 'windows'
+        shell: pwsh
+        run: |
+          choco install cmake ninja -y
+          echo "C:\Program Files\CMake\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
+
+      - name: Set up MSVC (Windows)
+        if: matrix.target_os == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.29
+        with:
+          cuda: '12.4.1'
+          method: 'network'
+
+      - name: Discover CUDA home (Linux CUDA)
+        if: matrix.target_os == 'linux'
+        id: torchaudio_cuda_home
+        shell: bash
+        run: |
+          set -euo pipefail
+          cuda_root=""
+          for candidate in "${CUDA_PATH:-}" "${CUDA_HOME:-}"; do
+            if [ -n "$candidate" ] && [ -d "$candidate" ]; then
+              cuda_root="$candidate"
+              break
+            fi
+          done
+          if [ -z "$cuda_root" ] && command -v nvcc >/dev/null 2>&1; then
+            cuda_root="$(cd "$(dirname "$(command -v nvcc)")/.."; pwd)"
+          fi
+          if [ -z "$cuda_root" ]; then
+            echo "Could not determine CUDA root" >&2
+            exit 1
+          fi
+          echo "cuda_root=$cuda_root" >> "$GITHUB_OUTPUT"
+
+      - id: torch-artifact-check
+        name: Check built torch wheel presence
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const artifactName = '${{ matrix.artifact_name }}';
+            const artifacts = await github.paginate(
+              github.rest.actions.listWorkflowRunArtifacts,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId,
+                per_page: 100,
+              }
+            );
+            const artifact = artifacts.find((item) => item.name === artifactName);
+            core.setOutput('exists', artifact ? 'true' : 'false');
+
+      - name: Download built torch wheel
+        if: steps.torch-artifact-check.outputs.exists == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist-torch
+
+      - name: Fail when built torch wheel is missing
+        if: steps.torch-artifact-check.outputs.exists != 'true'
+        shell: bash
+        run: |
+          echo "Missing torch artifact for ${{ matrix.artifact_name }}."
+          echo "torchaudio cannot be built for this CUDA matrix entry without the matching torch wheel."
+          exit 1
+
+      - name: Install built torch wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          WHEEL=$(python - <<'PY'
+          import pathlib
+          import sys
+
+          wheel_dir = pathlib.Path('dist-torch')
+          expected_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+          wheels = sorted(wheel_dir.glob('*.whl'))
+          matches = [wheel for wheel in wheels if expected_tag in wheel.name]
+
+          if not matches:
+            found = ', '.join(wheel.name for wheel in wheels) or '<none>'
+            raise SystemExit(
+              f"No torch wheel matching {expected_tag} found in dist-torch/: {found}"
+            )
+
+          print(matches[0])
+          PY
+          )
+          echo "Installing torch wheel: $WHEEL"
+          pip install --force-reinstall "$WHEEL"
+
+      - name: Clone torchaudio source
+        shell: bash
+        run: |
+          git clone \
+            --branch "v${{ matrix.torchaudio_version }}" \
+            --depth 1 \
+            https://github.com/pytorch/audio \
+            audio-src
+
+      - name: Install torchaudio build requirements
+        shell: bash
+        working-directory: audio-src
+        run: |
+          pip install "cmake<4" ninja "setuptools<82" wheel
+
+      - name: Trim PATH for Windows CUDA build
+        if: matrix.target_os == 'windows'
+        shell: pwsh
+        run: |
+          $trimmed = ($env:PATH -split ';' | Select-Object -Unique | Where-Object {
+            $_ -ne '' -and
+            $_ -notmatch '\\Microsoft Visual Studio\\' -and
+            $_ -notmatch '\\MSBuild\\' -and
+            $_ -notmatch '\\Common7\\'
+          }) -join ';'
+          "PATH=$trimmed" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build torchaudio wheel (Linux)
+        if: matrix.target_os == 'linux'
+        shell: bash
+        working-directory: audio-src
+        env:
+          BUILD_VERSION: ${{ matrix.torchaudio_version }}
+          CUDA_HOME: ${{ steps.torchaudio_cuda_home.outputs.cuda_root }}
+          SETUPTOOLS_USE_DISTUTILS: local
+        run: |
+          export USE_CUDA=1
+          python setup.py bdist_wheel
+
+      - name: Build torchaudio wheel (Windows)
+        if: matrix.target_os == 'windows'
+        shell: pwsh
+        working-directory: audio-src
+        env:
+          BUILD_VERSION: ${{ matrix.torchaudio_version }}
+          DISTUTILS_USE_SDK: "1"
+          SETUPTOOLS_USE_DISTUTILS: local
+        run: |
+          $env:USE_CUDA = '1'
+          if ($env:CUDA_PATH) {
+            $env:CUDA_HOME = $env:CUDA_PATH
+          }
+          python setup.py bdist_wheel
+
+      - name: Collect built wheel
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp audio-src/dist/*.whl dist/
+          ls -lh dist/
+
+      - name: Validate built wheel (Linux)
+        if: matrix.target_os == 'linux'
+        shell: bash
+        run: |
+          WHEEL=$(ls dist/*.whl | head -1)
+          pip install --force-reinstall --no-deps "$WHEEL"
+          python -c "
+          import torch, torchaudio
+          print(f'torchaudio version: {torchaudio.__version__}')
+          waveform = torch.zeros(1, 16000)
+          spec = torchaudio.transforms.MelSpectrogram(sample_rate=16000)(waveform)
+          print(f'mel spectrogram shape: {tuple(spec.shape)}')
+          cuda_version = torchaudio._extension._check_cuda_version()
+          assert cuda_version is not None, 'Expected torchaudio CUDA build'
+          print(f'torchaudio cuda version: {cuda_version}')
+          print('smoke-ok')
+          "
+
+      - name: Validate built wheel (Windows)
+        if: matrix.target_os == 'windows'
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem -Path dist -Filter *.whl | Select-Object -First 1
+          if (-not $wheel) { throw "No wheel found in dist/" }
+          pip install --force-reinstall --no-deps $wheel.FullName
+          python -c "
+          import traceback
+          try:
+              import torch, torchaudio
+              print(f'torchaudio version: {torchaudio.__version__}')
+              waveform = torch.zeros(1, 16000)
+              spec = torchaudio.transforms.MelSpectrogram(sample_rate=16000)(waveform)
+              print(f'mel spectrogram shape: {tuple(spec.shape)}')
+              cuda_version = torchaudio._extension._check_cuda_version()
+              assert cuda_version is not None, 'Expected torchaudio CUDA build'
+              print(f'torchaudio cuda version: {cuda_version}')
+              print('smoke-ok')
+          except Exception:
+              traceback.print_exc()
+              raise
+          "
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.torchaudio_artifact_name }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  validate-torchvision-artifacts:
+    needs: [check-upstream, build-torchvision]
+    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cuda_matrix_has_entries == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.check-upstream.outputs.cuda_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - id: artifact-check
+        name: Check torchvision wheel artifact presence
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const artifactName = '${{ matrix.torchvision_artifact_name }}';
+            const artifacts = await github.paginate(
+              github.rest.actions.listWorkflowRunArtifacts,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId,
+                per_page: 100,
+              }
+            );
+            const artifact = artifacts.find((item) => item.name === artifactName);
+            core.setOutput('exists', artifact ? 'true' : 'false');
+
+      - name: Download built wheel
+        if: steps.artifact-check.outputs.exists == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.torchvision_artifact_name }}
+          path: dist-artifact
+
+      - name: Validate wheel structure
+        if: steps.artifact-check.outputs.exists == 'true'
+        shell: bash
+        run: |
+          WHEEL=$(ls dist-artifact/*.whl | head -1)
+          python scripts/validate_wheel.py "$WHEEL" \
+            --expected-package torchvision \
+            --expected-version "${{ matrix.torchvision_version }}"
+
+      - name: Fail when expected artifact is missing
+        if: steps.artifact-check.outputs.exists != 'true'
+        shell: bash
+        run: |
+          echo "Missing build artifact for ${{ matrix.torchvision_artifact_name }}."
+          echo "A corresponding CUDA torchvision matrix job failed before upload."
+          exit 1
+
+  validate-torchaudio-artifacts:
+    needs: [check-upstream, build-torchaudio]
+    if: always() && needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cuda_matrix_has_entries == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.check-upstream.outputs.cuda_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - id: artifact-check
+        name: Check torchaudio wheel artifact presence
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const artifactName = '${{ matrix.torchaudio_artifact_name }}';
+            const artifacts = await github.paginate(
+              github.rest.actions.listWorkflowRunArtifacts,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId,
+                per_page: 100,
+              }
+            );
+            const artifact = artifacts.find((item) => item.name === artifactName);
+            core.setOutput('exists', artifact ? 'true' : 'false');
+
+      - name: Download built wheel
+        if: steps.artifact-check.outputs.exists == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.torchaudio_artifact_name }}
+          path: dist-artifact
+
+      - name: Validate wheel structure
+        if: steps.artifact-check.outputs.exists == 'true'
+        shell: bash
+        run: |
+          WHEEL=$(ls dist-artifact/*.whl | head -1)
+          python scripts/validate_wheel.py "$WHEEL" \
+            --expected-package torchaudio \
+            --expected-version "${{ matrix.torchaudio_version }}"
+
+      - name: Fail when expected artifact is missing
+        if: steps.artifact-check.outputs.exists != 'true'
+        shell: bash
+        run: |
+          echo "Missing build artifact for ${{ matrix.torchaudio_artifact_name }}."
+          echo "A corresponding CUDA torchaudio matrix job failed before upload."
+          exit 1
+
+  release:
+    if: needs.check-upstream.outputs.should_build == 'true' && needs.check-upstream.outputs.cuda_matrix_has_entries == 'true'
+    needs: [check-upstream, validate-artifacts, validate-torchvision-artifacts, validate-torchaudio-artifacts]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: cuda-release-${{ needs.check-upstream.outputs.release_tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Download CUDA artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          pattern: '*-cuda'
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Restore release plan
+        run: |
+          printf '%s' '${{ needs.check-upstream.outputs.release_plan_json }}' > release-plan.json
+          cat release-plan.json
+
+      - name: Update release state files
+        env:
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python scripts/update_release_state.py \
+            --plan-file release-plan.json \
+            --output-dir release-state \
+            --build-source-commit "${{ github.sha }}" \
+            --workflow-run-id "${{ github.run_id }}" \
+            --workflow-run-url "${GITHUB_RUN_URL}" \
+            --repository "${{ github.repository }}" \
+            --event-name "${{ github.event_name }}"
+
+      - id: commit-state
+        name: Commit release state
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-state
+
+          if git diff --cached --quiet; then
+            echo "release_commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "Record CUDA release state for ${{ needs.check-upstream.outputs.release_tag }}"
+          git push origin HEAD:${{ github.ref_name }}
+          echo "release_commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - id: push-tag
+        name: Create and push release tag
+        env:
+          RELEASE_TAG: ${{ needs.check-upstream.outputs.release_tag }}
+          RELEASE_COMMIT_SHA: ${{ steps.commit-state.outputs.release_commit_sha }}
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force --prune --prune-tags
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Tag already exists on origin: ${RELEASE_TAG}"
+            echo "tag_name=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null; then
+            git tag -d "${RELEASE_TAG}"
+          fi
+
+          git tag -a "${RELEASE_TAG}" "${RELEASE_COMMIT_SHA}" -m "Release ${RELEASE_TAG}"
+          git push origin "refs/tags/${RELEASE_TAG}"
+          echo "tag_name=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.push-tag.outputs.tag_name }}
+          name: "PyTorch ${{ needs.check-upstream.outputs.torch_version }} — Source-Built torch, torchvision, and torchaudio Wheels"
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+          body: |
+            Source-built **torch ${{ needs.check-upstream.outputs.torch_version }}**, matching torchvision, and matching torchaudio wheels for platforms and Python versions not covered by official PyPI releases.
+
+            ### Package Layout
+            - The release tag is shared across the full package family and remains torch-based.
+            - `torch`, `torchvision`, and `torchaudio` are published as separate wheel files.
+            - CPU and MPS assets are published by the CPU workflow first.
+            - Missing CUDA assets are appended by this follow-up CUDA workflow.
+
+            ### Platforms & Backends
+            | Platform | Backend |
+            |---|---|
+            | Linux x86\_64 | CUDA 12.4 |
+            | Windows x86\_64 | CUDA 12.4 |
+
+            ### Python Versions
+            See attached wheel filenames for the full CUDA matrix.
+
+            ### Notes
+            - These wheels preserve the normal package split: install `torch`, `torchvision`, and `torchaudio` separately as needed.
+            - CUDA wheels include compiled CUDA kernels. A physical NVIDIA GPU is required at runtime for GPU acceleration.
+            - Torch is built from the official PyTorch source at tag `v${{ needs.check-upstream.outputs.torch_version }}`.
+          files: release-assets/*
