@@ -71,3 +71,37 @@ Use the **Build PyTorch Family Wheels** workflow with `workflow_dispatch` to:
 | `update_release_state.py`  | Write `release-state/latest.json` and history snapshots for a shared release |
 | `resolve_companion_versions.py` | Resolve matching torchvision and torchaudio versions for a torch release |
 | `validate_wheel.py`        | Structural validation of a built package `.whl` file |
+| `build_cuda_local.py`      | Build local CUDA `torch`, `torchvision`, and `torchaudio` wheels for the current OS |
+| `build_cuda_local.ps1`     | Orchestrate native Windows and WSL2 Linux CUDA builds, then upload finished wheels to GitHub Releases |
+
+## Local CUDA Builds
+
+Use `scripts/build_cuda_local.ps1` from Windows when GitHub-hosted runners are too slow for CUDA builds. The script:
+
+- Builds Windows CUDA wheels natively on Windows
+- Builds Linux CUDA wheels inside WSL2
+- Reuses `release-state/latest.json` to default the torch version, release tag, and repository
+- Uploads the finished wheel files plus `SHA256SUMS.txt` to the matching GitHub release tag
+
+Example:
+
+```powershell
+$env:GITHUB_TOKEN = "<token with contents:write>"
+pwsh -File scripts/build_cuda_local.ps1 -TargetOs both -PythonVersions 3.13
+```
+
+Useful flags:
+
+- `-TargetOs windows` to build only Windows CUDA wheels
+- `-TargetOs linux` to build only Linux CUDA wheels through WSL2
+- `-SkipUpload` to keep wheels local without publishing them
+- `-BootstrapSystemDependencies` to let the script try package-manager installs for missing local build tools
+- `-ReleaseTag`, `-TorchVersion`, and `-Repository` to override release-state defaults
+
+Local prerequisites:
+
+- Windows host with Python for each target version, Visual Studio Build Tools 2022, Git, CUDA 12.4, and WSL2
+- Linux WSL2 distro with matching Python versions, Git, CUDA 12.4, and the usual build toolchain
+- A GitHub token with `contents:write` access if you want automatic release uploads
+
+The PowerShell entry script creates per-version virtual environments for Windows and WSL2 so the local build dependencies stay isolated from your normal Python installs.
