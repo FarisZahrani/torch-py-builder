@@ -41,8 +41,22 @@ jobs:
           python scripts/resolve_latest_torch.py --output resolved.json
           cat resolved.json
 
+      - name: Verify companion source tags exist
+        id: companions
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TORCH_VERSION=$(jq -r '.version' resolved.json)
+          python scripts/check_build_readiness.py \
+            --torch-version "${TORCH_VERSION}" \
+            --github-output "$GITHUB_OUTPUT" \
+            --exit-zero
+
       - name: Check if release tag already exists
         id: check
+        if: steps.companions.outputs.ready == 'true'
         env:
           FORCE_BUILD: ${{ github.event.inputs.force_build || 'false' }}
         run: |
@@ -69,15 +83,13 @@ jobs:
           fi
 
       - name: Trigger build workflow
-        if: steps.check.outputs.should_build == 'true'
+        if: steps.companions.outputs.ready == 'true' && steps.check.outputs.should_build == 'true'
         env:
           TORCH_VERSION: ${{ steps.check.outputs.torch_version }}
         run: |
           set -euo pipefail
 
-          # Always force rebuild — the tag check is the gate; the build workflow's
-          # own state-file comparison would otherwise say "no changes" and skip everything.
-          PAYLOAD="{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"force_rebuild\":\"true\"}}"
+          PAYLOAD='{"ref":"${{ github.ref_name }}","inputs":{"force_rebuild":"false"}}'
 
           curl -sS -L \
             -X POST \

@@ -6,3 +6,7 @@ __pycache__/
 .venv/
 *.whl
 .vscode/mcp.json
+.env
+.env.*
+!.env.example
+*.deb

@@ -1,10 +1,6 @@
 # torch-py-builder
 
-Source-built torch, torchvision, and torchaudio wheels for platforms and Python versions not covered by official PyPI releases.
-
-## Problem
-
-PyTorch's official PyPI wheels only support a limited set of platform/Python combinations. As of 2025, macOS Intel (x86\_64) and Python 3.13+ are no longer covered for the latest releases. This project builds torch from source on GitHub Actions, then builds matching torchvision and torchaudio wheels, and publishes them together as GitHub Releases.
+This repository builds `torch`, `torchvision`, and `torchaudio` from source and publishes the wheels as GitHub Releases. CPU and MPS builds run in GitHub Actions; CUDA builds for Linux and Windows can be produced locally and uploaded to the same release tag.
 
 ## Supported Platforms
 
@@ -76,7 +72,7 @@ Use the **Build PyTorch Family Wheels** workflow with `workflow_dispatch` to:
 
 ## Local CUDA Builds
 
-Use `scripts/build_cuda_local.ps1` from Windows when GitHub-hosted runners are too slow for CUDA builds. The script:
+Use `scripts/build_cuda_local.ps1` from Windows to build CUDA wheels for Linux (via WSL2) and Windows, then upload them to the matching GitHub release.
 
 - Builds Windows CUDA wheels natively on Windows
 - Builds Linux CUDA wheels inside WSL2

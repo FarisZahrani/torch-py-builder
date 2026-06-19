@@ -63,6 +63,114 @@ jobs:
           python scripts/plan_release.py --help
           python scripts/update_release_state.py --help
           python scripts/validate_wheel.py --help
+          python scripts/matrix_release_assets.py --help
+          python scripts/merge_release_checksums.py --help
+          python scripts/check_build_readiness.py --help
+          python scripts/verify_release_bundle.py --help
+
+  matrix-release-assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Validate fill-missing planning against torch-2.11.0 assets
+        shell: python
+        run: |
+          import json
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "scripts")
+          from matrix_release_assets import (
+              matrix_entry_is_complete,
+              select_missing_matrix_entries,
+          )
+
+          release_assets = [
+              "torch-2.11.0-cp313-cp313-linux_x86_64.whl",
+              "torch-2.11.0-cp313-cp313-macosx_10_15_universal2.whl",
+              "torch-2.11.0-cp313-cp313-macosx_14_0_universal2.whl",
+              "torchaudio-2.11.0-cp313-cp313-linux_x86_64.whl",
+              "torchaudio-2.11.0-cp313-cp313-macosx_10_13_universal2.whl",
+              "torchaudio-2.11.0-cp313-cp313-win_amd64.whl",
+              "torchvision-0.26.0-cp313-cp313-linux_x86_64.whl",
+              "torchvision-0.26.0-cp313-cp313-macosx_10_15_universal2.whl",
+              "torchvision-0.26.0-cp313-cp313-macosx_11_0_universal2.whl",
+              "torchvision-0.26.0-cp313-cp313-win_amd64.whl",
+          ]
+
+          matrix = json.loads(Path("config/build_matrix.json").read_text(encoding="utf-8"))
+          cpu_entries = []
+          for target in matrix["targets"]:
+              if target.get("backend") == "cuda":
+                  continue
+              for py_version in matrix["python_versions"]:
+                  cpu_entries.append(
+                      {
+                          "torch_version": "2.11.0",
+                          "torchvision_version": "0.26.0",
+                          "torchaudio_version": "2.11.0",
+                          "python_version": py_version,
+                          **target,
+                      }
+                  )
+
+          cpu_matrix = {"include": cpu_entries}
+          missing = select_missing_matrix_entries(cpu_matrix, release_assets)
+          missing_keys = {
+              (entry["target_os"], entry["target_arch"], entry.get("backend", "cpu"))
+              for entry in missing["include"]
+          }
+          assert missing_keys == {
+              ("windows", "x86_64", "cpu"),
+              ("macos", "arm64", "mps"),
+          }, f"unexpected missing matrix entries: {missing_keys}"
+
+          windows_entry = next(
+              entry
+              for entry in cpu_entries
+              if entry["target_os"] == "windows"
+          )
+          assert not matrix_entry_is_complete(windows_entry, release_assets)
+
+          linux_entry = next(
+              entry for entry in cpu_entries if entry["target_os"] == "linux"
+          )
+          assert matrix_entry_is_complete(linux_entry, release_assets)
+
+  companion-versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Validate derived companion version mapping
+        shell: python
+        run: |
+          import sys
+
+          sys.path.insert(0, "scripts")
+          from companion_source import (
+              derive_torchaudio_version,
+              derive_torchvision_version,
+          )
+
+          assert derive_torchvision_version("2.11.0") == "0.26.0"
+          assert derive_torchaudio_version("2.11.0") == "2.11.0"
+          assert derive_torchvision_version("2.12.0") == "0.27.0"
+          assert derive_torchaudio_version("2.12.0") == "2.12.0"
+
+      - name: Verify torch 2.11.0 companion source tags exist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/check_build_readiness.py --torch-version 2.11.0
 
   plan-smoke:
     runs-on: ubuntu-latest

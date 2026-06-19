@@ -97,6 +97,136 @@ def run_command(
     log(f"Completed {label}")
 
 
+def dll_load_preamble() -> str:
+    return (
+        "import os\n"
+        "import site\n"
+        "if os.name == 'nt':\n"
+        "    cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')\n"
+        "    dll_dirs = []\n"
+        "    if cuda_home:\n"
+        "        dll_dirs.extend([\n"
+        "            os.path.join(cuda_home, 'bin'),\n"
+        "            os.path.join(cuda_home, 'extras', 'CUPTI', 'lib64'),\n"
+        "            os.path.join(cuda_home, 'extras', 'CUPTI', 'bin'),\n"
+        "        ])\n"
+        "    for sp in site.getsitepackages():\n"
+        "        torch_lib = os.path.join(sp, 'torch', 'lib')\n"
+        "        if os.path.isdir(torch_lib):\n"
+        "            dll_dirs.append(torch_lib)\n"
+        "    for dll_dir in dll_dirs:\n"
+        "        if dll_dir and os.path.isdir(dll_dir):\n"
+        "            os.add_dll_directory(dll_dir)\n"
+        "    if dll_dirs:\n"
+        "        os.environ['PATH'] = os.pathsep.join(dll_dirs + [os.environ.get('PATH', '')])\n"
+        "    if cuda_home:\n"
+        "        os.environ['CUDA_HOME'] = cuda_home\n"
+    )
+
+
+def installed_torch_lib_dir() -> Path | None:
+    import site
+
+    for site_packages in site.getsitepackages():
+        torch_lib = Path(site_packages) / "torch" / "lib"
+        if torch_lib.is_dir():
+            return torch_lib
+    return None
+
+
+def prepare_host_for_smoke_test(target_os: str, cuda_home: str) -> None:
+    if target_os != "windows":
+        os.environ["CUDA_HOME"] = cuda_home
+        return
+
+    cuda_root = Path(cuda_home)
+    path_prefixes = [
+        str(cuda_root / "bin"),
+        str(cuda_root / "extras" / "CUPTI" / "lib64"),
+        str(cuda_root / "extras" / "CUPTI" / "bin"),
+    ]
+    torch_lib = installed_torch_lib_dir()
+    if torch_lib is not None:
+        path_prefixes.append(str(torch_lib))
+
+    os.environ["CUDA_HOME"] = cuda_home
+    existing_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = os.pathsep.join(path_prefixes + [existing_path])
+
+
+def smoke_test_environment(
+    target_os: str,
+    cuda_home: str,
+    base_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    env = os.environ.copy()
+    if base_env:
+        env.update(base_env)
+    path_prefixes: list[str] = []
+
+    if target_os == "windows":
+        cuda_root = Path(cuda_home)
+        path_prefixes.extend(
+            [
+                str(cuda_root / "bin"),
+                str(cuda_root / "extras" / "CUPTI" / "lib64"),
+                str(cuda_root / "extras" / "CUPTI" / "bin"),
+            ]
+        )
+        torch_lib = installed_torch_lib_dir()
+        if torch_lib is not None:
+            path_prefixes.append(str(torch_lib))
+        env["CUDA_HOME"] = cuda_home
+
+    existing_path = env.get("PATH", os.environ.get("PATH", ""))
+    if path_prefixes:
+        env["PATH"] = os.pathsep.join(path_prefixes + [existing_path])
+    return env
+
+
+def find_windows_libomp() -> Path | None:
+    program_files = os.environ.get("ProgramFiles")
+    if not program_files:
+        return None
+    candidates = [
+        Path(program_files) / "LLVM" / "bin" / "libomp140.x86_64.dll",
+        Path(program_files)
+        / "Microsoft Visual Studio"
+        / "2022"
+        / "Community"
+        / "VC"
+        / "Tools"
+        / "Llvm"
+        / "x64"
+        / "bin"
+        / "libomp140.x86_64.dll",
+        Path(program_files)
+        / "Microsoft Visual Studio"
+        / "2022"
+        / "Professional"
+        / "VC"
+        / "Tools"
+        / "Llvm"
+        / "x64"
+        / "bin"
+        / "libomp140.x86_64.dll",
+        Path(program_files)
+        / "Microsoft Visual Studio"
+        / "2022"
+        / "Enterprise"
+        / "VC"
+        / "Tools"
+        / "Llvm"
+        / "x64"
+        / "bin"
+        / "libomp140.x86_64.dll",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def capture_command(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> str:
     merged_env = os.environ.copy()
     if env:
@@ -274,7 +404,21 @@ def copy_to_artifacts(wheel_path: Path, artifact_root: Path) -> Path:
     artifact_root.mkdir(parents=True, exist_ok=True)
     destination = artifact_root / wheel_path.name
     shutil.copy2(wheel_path, destination)
+    flush_artifact_writes(destination)
     return destination
+
+
+def flush_artifact_writes(artifact_path: Path) -> None:
+    if sys.platform.startswith("linux"):
+        try:
+            os.sync()
+        except AttributeError:
+            pass
+        try:
+            with artifact_path.open("rb") as artifact_file:
+                os.fsync(artifact_file.fileno())
+        except OSError:
+            pass
 
 
 def validate_wheel_structure(wheel_path: Path, expected_version: str, expected_package: str | None = None) -> None:
@@ -290,11 +434,43 @@ def validate_wheel_structure(wheel_path: Path, expected_version: str, expected_p
 
 
 def run_python_inline(code: str, *, cwd: Path, env: dict[str, str] | None = None, label: str) -> None:
-    run_command([sys.executable, "-c", code], cwd=cwd, env=env, label=label)
+    if env is None:
+        run_command([sys.executable, "-c", code], cwd=cwd, label=label)
+        return
+
+    merged_env = os.environ.copy()
+    merged_env.update(env)
+    run_command([sys.executable, "-c", code], cwd=cwd, env=merged_env, label=label)
+
+
+def run_smoke_test(code: str, *, cwd: Path, label: str) -> None:
+    smoke_script = cwd / ".cuda_smoke_test.py"
+    smoke_script.write_text(code, encoding="utf-8")
+    try:
+        run_command([sys.executable, str(smoke_script)], cwd=cwd, label=label)
+    finally:
+        smoke_script.unlink(missing_ok=True)
 
 
 def pip_install(arguments: list[str], *, cwd: Path, env: dict[str, str] | None = None, label: str) -> None:
     run_command([sys.executable, "-m", "pip", *arguments], cwd=cwd, env=env, label=label)
+
+
+def max_parallel_jobs(target_os: str) -> int:
+    cpu_count = os.cpu_count() or 4
+    cpu_target = max(1, int(cpu_count * 0.8))
+    if target_os != "linux":
+        return cpu_target
+
+    try:
+        meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
+        mem_kb = int(next(line for line in meminfo.splitlines() if line.startswith("MemTotal:")).split()[1])
+        mem_gb = mem_kb / (1024 * 1024)
+        # Budget ~2 GiB per parallel C++/CUDA compile to avoid WSL OOM kills.
+        mem_cap = max(1, int(mem_gb / 2))
+        return max(1, min(cpu_target, mem_cap))
+    except (OSError, StopIteration, ValueError):
+        return max(1, min(cpu_target, 6))
 
 
 def build_environment(target_os: str, torch_version: str, cuda_home: str, work_root: Path) -> dict[str, str]:
@@ -309,7 +485,7 @@ def build_environment(target_os: str, torch_version: str, cuda_home: str, work_r
     }
     environment.update(optional_sccache_environment())
 
-    max_jobs = str(os.cpu_count() or 4)
+    max_jobs = str(max_parallel_jobs(target_os))
     environment["MAX_JOBS"] = max_jobs
     log(f"Using MAX_JOBS={max_jobs}")
 
@@ -332,6 +508,9 @@ def build_environment(target_os: str, torch_version: str, cuda_home: str, work_r
                 "TORCH_CUDA_ARCH_LIST": WINDOWS_CUDA_ARCH_LIST,
             }
         )
+        if find_windows_libomp() is None:
+            environment["USE_OPENMP"] = "0"
+            log("libomp140.x86_64.dll not found; disabling OpenMP on Windows")
 
     python_executable = sys.executable
     environment["PYTHON_EXECUTABLE"] = python_executable
@@ -340,11 +519,43 @@ def build_environment(target_os: str, torch_version: str, cuda_home: str, work_r
     environment["DESIRED_PYTHON"] = python_tag()
 
     cmake_bin = get_pip_cmake_bin(work_root)
-    environment["PATH"] = str(cmake_bin) + os.pathsep + environment.get("PATH", os.environ.get("PATH", ""))
+    path_entries = [str(cmake_bin)]
+    if target_os == "windows":
+        cuda_bin = Path(cuda_home) / "bin"
+        path_entries.insert(0, str(cuda_bin))
+    existing_path = environment.get("PATH", os.environ.get("PATH", ""))
+    environment["PATH"] = os.pathsep.join(path_entries + [existing_path])
     return environment
 
 
 def build_torch(args: argparse.Namespace, target_os: str, work_root: Path, artifact_root: Path) -> Path:
+    platform_tag = "win_amd64" if target_os == "windows" else "linux_x86_64"
+    wheel_name = f"torch-{args.torch_version}-{python_tag()}-{python_tag()}-{platform_tag}.whl"
+    existing_wheel = artifact_root / wheel_name
+    if existing_wheel.exists():
+        cuda_home = ensure_cuda_home(target_os)
+        smoke_code = (
+            dll_load_preamble() + "import torch\n"
+            "assert torch.version.cuda is not None\n"
+            "print('smoke-ok')\n"
+        )
+        try:
+            pip_install(
+                ["install", "--force-reinstall", str(existing_wheel)],
+                cwd=work_root,
+                label="Reinstall existing torch wheel for smoke test",
+            )
+            prepare_host_for_smoke_test(target_os, cuda_home)
+            run_smoke_test(
+                smoke_code,
+                cwd=work_root,
+                label=f"Reuse existing torch wheel ({target_os})",
+            )
+            log(f"Reusing validated torch wheel: {existing_wheel.name}")
+            return existing_wheel
+        except RuntimeError:
+            log(f"Existing torch wheel failed smoke test; rebuilding: {existing_wheel.name}")
+
     source_dir = work_root / f"pytorch-src-v{args.torch_version}"
     ensure_checkout(source_dir, "https://github.com/pytorch/pytorch", f"v{args.torch_version}")
 
@@ -373,6 +584,13 @@ def build_torch(args: argparse.Namespace, target_os: str, work_root: Path, artif
     remove_path(source_dir / "dist")
 
     show_sccache_stats(work_root)
+    if target_os == "windows" and environment.get("USE_OPENMP") == "0":
+        cmake_cache = source_dir / "build" / "CMakeCache.txt"
+        ninja_build = source_dir / "build" / "build.ninja"
+        if cmake_cache.exists() or ninja_build.exists():
+            log("Clearing CMake cache before libtorch build (OpenMP disabled)")
+            remove_path(cmake_cache)
+            remove_path(ninja_build)
     run_command(
         [sys.executable, "tools/build_libtorch.py"],
         cwd=source_dir,
@@ -380,6 +598,13 @@ def build_torch(args: argparse.Namespace, target_os: str, work_root: Path, artif
         label=f"Build libtorch ({target_os})",
         heartbeat_paths=[source_dir / "build", source_dir / "dist"],
     )
+    # build_libtorch configures CMake with BUILD_PYTHON=OFF; clear cache so wheel build can enable it.
+    cmake_cache = source_dir / "build" / "CMakeCache.txt"
+    ninja_build = source_dir / "build" / "build.ninja"
+    if cmake_cache.exists() or ninja_build.exists():
+        log(f"Clearing CMake cache before wheel build ({target_os})")
+        remove_path(cmake_cache)
+        remove_path(ninja_build)
     run_command(
         [sys.executable, "-m", "build", "--wheel", "--no-isolation"],
         cwd=source_dir,
@@ -394,7 +619,7 @@ def build_torch(args: argparse.Namespace, target_os: str, work_root: Path, artif
     validate_wheel_structure(copied_wheel, args.torch_version)
 
     smoke_code = (
-        "import torch\n"
+        dll_load_preamble() + "import torch\n"
         "print(f'torch version: {torch.__version__}')\n"
         "t = torch.ones(2, 2)\n"
         "assert t.sum().item() == 4.0\n"
@@ -405,13 +630,26 @@ def build_torch(args: argparse.Namespace, target_os: str, work_root: Path, artif
         "print(f'CUDA compiled version: {torch.version.cuda}')\n"
         "print('smoke-ok')\n"
     )
-    pip_install(["install", "--force-reinstall", str(copied_wheel)], cwd=source_dir, label="Install built torch wheel")
-    run_python_inline(smoke_code, cwd=source_dir, label=f"Smoke test torch ({target_os})")
+    pip_install(
+        ["install", "--force-reinstall", "--no-deps", str(copied_wheel)],
+        cwd=source_dir,
+        label="Install built torch wheel",
+    )
+    # Run outside the source tree so imports resolve to the installed wheel.
+    prepare_host_for_smoke_test(target_os, cuda_home)
+    run_smoke_test(smoke_code, cwd=work_root, label=f"Smoke test torch ({target_os})")
     return copied_wheel
 
 
 def installed_torch_version(cwd: Path) -> str:
-    return capture_command([sys.executable, "-c", "import torch; print(torch.__version__)"], cwd=cwd)
+    code = dll_load_preamble() + "import torch\nprint(torch.__version__)\n"
+    smoke_script = cwd / ".cuda_torch_version.py"
+    smoke_script.write_text(code, encoding="utf-8")
+    try:
+        output = capture_command([sys.executable, str(smoke_script)], cwd=cwd)
+    finally:
+        smoke_script.unlink(missing_ok=True)
+    return output
 
 
 def build_torchvision(
@@ -425,7 +663,9 @@ def build_torchvision(
     ensure_checkout(source_dir, "https://github.com/pytorch/vision", f"v{args.torchvision_version}")
 
     pip_install(["install", "--force-reinstall", str(torch_wheel)], cwd=source_dir, label="Install local torch wheel for torchvision")
-    installed_version = installed_torch_version(source_dir)
+    cuda_home = ensure_cuda_home(target_os)
+    prepare_host_for_smoke_test(target_os, cuda_home)
+    installed_version = installed_torch_version(work_root)
     pip_install(
         ["install", "cmake<4", "ninja", "numpy", "pillow", "setuptools<82", "wheel"],
         cwd=source_dir,
@@ -440,10 +680,11 @@ def build_torchvision(
         "FORCE_CUDA": "1",
     }
     if target_os == "linux":
-        environment["CUDA_HOME"] = ensure_cuda_home(target_os)
+        environment["CUDA_HOME"] = cuda_home
     else:
         environment["DISTUTILS_USE_SDK"] = "1"
-        environment["CUDA_HOME"] = ensure_cuda_home(target_os)
+        environment["CUDA_HOME"] = cuda_home
+        environment["PATH"] = str(Path(cuda_home) / "bin") + os.pathsep + os.environ.get("PATH", "")
 
     run_command(
         [sys.executable, "setup.py", "bdist_wheel"],
@@ -458,7 +699,7 @@ def build_torchvision(
     validate_wheel_structure(copied_wheel, args.torchvision_version, expected_package="torchvision")
 
     smoke_code = (
-        "import torch, torchvision\n"
+        dll_load_preamble() + "import torch, torchvision\n"
         "print(f'torchvision version: {torchvision.__version__}')\n"
         "boxes = torch.tensor([[0.0, 0.0, 10.0, 10.0], [1.0, 1.0, 9.0, 9.0]])\n"
         "scores = torch.tensor([0.9, 0.8])\n"
@@ -474,7 +715,9 @@ def build_torchvision(
         cwd=source_dir,
         label="Install built torchvision wheel",
     )
-    run_python_inline(smoke_code, cwd=source_dir, label=f"Smoke test torchvision ({target_os})")
+    # Run outside the source tree so imports resolve to the installed wheel.
+    prepare_host_for_smoke_test(target_os, cuda_home)
+    run_smoke_test(smoke_code, cwd=work_root, label=f"Smoke test torchvision ({target_os})")
     return copied_wheel
 
 
@@ -496,16 +739,18 @@ def build_torchaudio(
     )
 
     remove_path(source_dir / "dist")
+    cuda_home = ensure_cuda_home(target_os)
     environment = {
         "BUILD_VERSION": args.torchaudio_version,
         "SETUPTOOLS_USE_DISTUTILS": "local",
         "USE_CUDA": "1",
     }
     if target_os == "linux":
-        environment["CUDA_HOME"] = ensure_cuda_home(target_os)
+        environment["CUDA_HOME"] = cuda_home
     else:
         environment["DISTUTILS_USE_SDK"] = "1"
-        environment["CUDA_HOME"] = ensure_cuda_home(target_os)
+        environment["CUDA_HOME"] = cuda_home
+        environment["PATH"] = str(Path(cuda_home) / "bin") + os.pathsep + os.environ.get("PATH", "")
 
     run_command(
         [sys.executable, "setup.py", "bdist_wheel"],
@@ -520,7 +765,7 @@ def build_torchaudio(
     validate_wheel_structure(copied_wheel, args.torchaudio_version, expected_package="torchaudio")
 
     smoke_code = (
-        "import torch, torchaudio\n"
+        dll_load_preamble() + "import torch, torchaudio\n"
         "print(f'torchaudio version: {torchaudio.__version__}')\n"
         "waveform = torch.zeros(1, 16000)\n"
         "spec = torchaudio.transforms.MelSpectrogram(sample_rate=16000)(waveform)\n"
@@ -535,7 +780,9 @@ def build_torchaudio(
         cwd=source_dir,
         label="Install built torchaudio wheel",
     )
-    run_python_inline(smoke_code, cwd=source_dir, label=f"Smoke test torchaudio ({target_os})")
+    # Run outside the source tree so imports resolve to the installed wheel.
+    prepare_host_for_smoke_test(target_os, cuda_home)
+    run_smoke_test(smoke_code, cwd=work_root, label=f"Smoke test torchaudio ({target_os})")
     return copied_wheel
 
 

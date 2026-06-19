@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       force_rebuild:
-        description: "Force build even if latest release already has the same version."
+        description: "Force a full rebuild of every matrix entry. Leave false to build only missing release wheels."
         required: false
         default: "false"
         type: choice
@@ -67,7 +67,7 @@ jobs:
       torchvision_version: ${{ steps.resolve-companions.outputs.torchvision_version }}
       torchaudio_version: ${{ steps.resolve-companions.outputs.torchaudio_version }}
       release_tag: ${{ steps.plan.outputs.release_tag }}
-      release_plan_json: ${{ steps.plan.outputs.release_plan_json }}
+      release_plan_json: ${{ steps.plan-phase.outputs.release_plan_json }}
       matrix: ${{ steps.make-matrix.outputs.matrix }}
       matrix_has_entries: ${{ steps.make-matrix.outputs.matrix_has_entries }}
       cpu_matrix: ${{ steps.plan-phase.outputs.cpu_matrix }}
@@ -125,6 +125,8 @@ jobs:
           echo "release_plan_json=$(jq -c . release-plan.json)" >> "$GITHUB_OUTPUT"
 
       - id: resolve-companions
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -155,6 +157,9 @@ jobs:
           torch_version = plan["torch_version"]
           torchvision_version = companion_versions["torchvision_version"]
           torchaudio_version = companion_versions["torchaudio_version"]
+          torch_git_tag = companion_versions["torch_git_tag"]
+          torchvision_git_tag = companion_versions["torchvision_git_tag"]
+          torchaudio_git_tag = companion_versions["torchaudio_git_tag"]
           python_versions = matrix_config["python_versions"]
           targets = matrix_config["targets"]
 
@@ -203,6 +208,9 @@ jobs:
                           "torch_version": torch_version,
                           "torchvision_version": torchvision_version,
                           "torchaudio_version": torchaudio_version,
+                          "torch_git_tag": torch_git_tag,
+                          "torchvision_git_tag": torchvision_git_tag,
+                          "torchaudio_git_tag": torchaudio_git_tag,
                           "python_version": py_version,
                           "artifact_name": artifact_name,
                           "torchvision_artifact_name": torchvision_artifact_name,
@@ -261,54 +269,26 @@ jobs:
             }
 
       - id: plan-phase
-        shell: python
         env:
           CPU_CANDIDATE_MATRIX: ${{ steps.make-matrix.outputs.cpu_candidate_matrix }}
           CUDA_CANDIDATE_MATRIX: ${{ steps.make-matrix.outputs.cuda_candidate_matrix }}
           RELEASE_ASSET_NAMES_JSON: ${{ steps.inspect-release-assets.outputs.asset_names_json }}
         run: |
-          import json
-          import os
-          from pathlib import Path
+          set -euo pipefail
 
-          plan = json.loads(Path("release-plan.json").read_text(encoding="utf-8"))
-          cpu_candidate_matrix = json.loads(
-              os.environ.get("CPU_CANDIDATE_MATRIX") or '{"include": []}'
-          )
-          cuda_candidate_matrix = json.loads(
-              os.environ.get("CUDA_CANDIDATE_MATRIX") or '{"include": []}'
-          )
-          release_asset_names = set(
-              json.loads(os.environ.get("RELEASE_ASSET_NAMES_JSON") or "[]")
-          )
+          printf '%s' "${CPU_CANDIDATE_MATRIX}" > cpu-candidate-matrix.json
+          printf '%s' "${CUDA_CANDIDATE_MATRIX}" > cuda-candidate-matrix.json
+          printf '%s' "${RELEASE_ASSET_NAMES_JSON}" > release-asset-names.json
 
-          def select_missing_entries(matrix: dict) -> dict:
-              filtered = []
-              for entry in matrix.get("include", []):
-                  expected_assets = {
-                      entry["artifact_name"],
-                      entry["torchvision_artifact_name"],
-                      entry["torchaudio_artifact_name"],
-                  }
-                  if not expected_assets.issubset(release_asset_names):
-                      filtered.append(entry)
-              return {"include": filtered}
+          python scripts/matrix_release_assets.py \
+            --plan-file release-plan.json \
+            --cpu-candidate-matrix @cpu-candidate-matrix.json \
+            --cuda-candidate-matrix @cuda-candidate-matrix.json \
+            --release-assets-json "$(cat release-asset-names.json)" \
+            --github-output "$GITHUB_OUTPUT" \
+            --output-json matrix-phase-plan.json
 
-          if plan.get("release_reason") == "forced":
-              cpu_matrix = cpu_candidate_matrix
-              cuda_missing_now = cuda_candidate_matrix
-          else:
-              cpu_matrix = select_missing_entries(cpu_candidate_matrix)
-              cuda_missing_now = select_missing_entries(cuda_candidate_matrix)
-
-          should_build = bool(cpu_matrix["include"])
-
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-              fh.write(f"should_build={'true' if should_build else 'false'}\n")
-              fh.write(f"cpu_matrix={json.dumps(cpu_matrix)}\n")
-              fh.write(
-                  f"cpu_matrix_has_entries={'true' if cpu_matrix['include'] else 'false'}\n"
-              )
+          cat matrix-phase-plan.json
 
   validate-scripts:
     needs: check-upstream
@@ -331,6 +311,10 @@ jobs:
           python scripts/plan_release.py --help
           python scripts/update_release_state.py --help
           python scripts/validate_wheel.py --help
+          python scripts/matrix_release_assets.py --help
+          python scripts/merge_release_checksums.py --help
+          python scripts/check_build_readiness.py --help
+          python scripts/verify_release_bundle.py --help
 
   build:
     needs: [check-upstream, validate-scripts]
@@ -442,7 +426,7 @@ jobs:
         shell: bash
         run: |
           git clone \
-            --branch "v${{ matrix.torch_version }}" \
+            --branch "${{ matrix.torch_git_tag }}" \
             --depth 1 \
             https://github.com/pytorch/pytorch \
             pytorch-src
@@ -1096,7 +1080,7 @@ jobs:
         shell: bash
         run: |
           git clone \
-            --branch "v${{ matrix.torchvision_version }}" \
+            --branch "${{ matrix.torchvision_git_tag }}" \
             --depth 1 \
             https://github.com/pytorch/vision \
             vision-src
@@ -1357,7 +1341,7 @@ jobs:
         shell: bash
         run: |
           git clone \
-            --branch "v${{ matrix.torchaudio_version }}" \
+            --branch "${{ matrix.torchaudio_git_tag }}" \
             --depth 1 \
             https://github.com/pytorch/audio \
             audio-src
@@ -1618,10 +1602,55 @@ jobs:
           pattern: '*-mps'
           merge-multiple: true
 
+      - name: Fetch existing SHA256SUMS
+        id: fetch-sha
+        uses: actions/github-script@v8
+        env:
+          RELEASE_TAG: ${{ needs.check-upstream.outputs.release_tag }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG
+            try {
+              const release = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              })
+              const asset = release.data.assets.find((item) => item.name === 'SHA256SUMS.txt')
+              if (!asset) {
+                core.setOutput('found', 'false')
+                return
+              }
+              const response = await fetch(asset.browser_download_url)
+              const content = await response.text()
+              const fs = require('fs')
+              fs.writeFileSync('existing-sha256sums.txt', content)
+              core.setOutput('found', 'true')
+            } catch (error) {
+              if (error.status === 404) {
+                core.setOutput('found', 'false')
+                return
+              }
+              throw error
+            }
+
       - name: Generate checksums
         run: |
-          cd release-assets
-          sha256sum * > SHA256SUMS.txt
+          MERGE_ARGS=(--assets-dir release-assets)
+          if [ -f existing-sha256sums.txt ]; then
+            MERGE_ARGS+=(--existing-sha256sums-file existing-sha256sums.txt)
+          fi
+          python scripts/merge_release_checksums.py "${MERGE_ARGS[@]}"
+
+      - name: Verify release bundle completeness
+        env:
+          CPU_MATRIX: ${{ needs.check-upstream.outputs.cpu_matrix }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${CPU_MATRIX}" > cpu-matrix.json
+          python scripts/verify_release_bundle.py \
+            --matrix @cpu-matrix.json \
+            --assets-dir release-assets
 
       - name: Restore release plan
         run: |
@@ -1691,6 +1720,7 @@ jobs:
           tag_name: ${{ steps.push-tag.outputs.tag_name }}
           name: "PyTorch ${{ needs.check-upstream.outputs.torch_version }} — Source-Built torch, torchvision, and torchaudio Wheels"
           fail_on_unmatched_files: true
+          overwrite_files: true
           generate_release_notes: false
           body: |
             Source-built **torch ${{ needs.check-upstream.outputs.torch_version }}**, matching torchvision, and matching torchaudio wheels for platforms and Python versions not covered by official PyPI releases.

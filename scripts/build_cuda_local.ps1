@@ -15,15 +15,54 @@ param(
 
     [string]$WslDistro,
 
-    [string]$WslWorkRoot = '~/.cache/torch-py-builder/local-cuda',
+    [string]$WslWorkRoot,
 
     [switch]$BootstrapSystemDependencies,
 
-    [switch]$SkipUpload
+    [switch]$SkipUpload,
+
+    [switch]$UploadOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Import-DotEnv {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        return
+    }
+
+    Get-Content -Path $Path -Encoding utf8 | ForEach-Object {
+        $line = $_.Trim()
+        if (-not $line -or $line.StartsWith('#')) {
+            return
+        }
+        $equalsIndex = $line.IndexOf('=')
+        if ($equalsIndex -lt 1) {
+            return
+        }
+        $name = $line.Substring(0, $equalsIndex).Trim()
+        $value = $line.Substring($equalsIndex + 1).Trim()
+        if ($value.Length -ge 2) {
+            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+        }
+        if (-not $name) {
+            return
+        }
+        $existing = Get-Item -Path "Env:$name" -ErrorAction SilentlyContinue
+        if ($existing -and -not [string]::IsNullOrEmpty($existing.Value)) {
+            return
+        }
+        Set-Item -Path "Env:$name" -Value $value
+    }
+}
+
+$repoRootForEnv = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+Import-DotEnv -Path (Join-Path $repoRootForEnv '.env')
 
 function Write-Step {
     param([string]$Message)
@@ -142,12 +181,19 @@ function Invoke-WslBash {
     if ($WslDistro) {
         $arguments += @('-d', $WslDistro)
     }
-    $arguments += @('bash', '-lc', $CommandText)
+    $arguments += @('-e', 'bash', '-s')
 
-    Write-Step "Running in WSL: $CommandText"
-    & wsl.exe @arguments
+    Write-Step "Running in WSL (bash -s): $CommandText"
+    $CommandText | & wsl.exe @arguments
     if ($LASTEXITCODE -ne 0) {
         throw "WSL command failed with exit code $LASTEXITCODE"
+    }
+
+    if ($WslDistro) {
+        & wsl.exe -d $WslDistro -e sync
+    }
+    else {
+        & wsl.exe -e sync
     }
 }
 
@@ -204,7 +250,7 @@ function Get-GitHubToken {
     if ($env:GH_TOKEN) {
         return $env:GH_TOKEN
     }
-    throw 'Set -GitHubToken or the GITHUB_TOKEN/GH_TOKEN environment variable before uploading.'
+    throw 'Set -GitHubToken, GITHUB_TOKEN/GH_TOKEN, or GITHUB_TOKEN in the repo .env file before uploading.'
 }
 
 function Invoke-GitHubJsonRequest {
@@ -335,10 +381,76 @@ function Upload-ReleaseAsset {
     }
     $uploadBase = ($Release.upload_url -replace '\{.*$', '')
     $encodedName = [System.Uri]::EscapeDataString($File.Name)
-    $uploadUri = "$uploadBase?name=$encodedName"
+    $uploadUri = "${uploadBase}?name=${encodedName}"
 
     Write-Step "Uploading $($File.Name)"
     Invoke-RestMethod -Method POST -Uri $uploadUri -Headers $headers -ContentType 'application/octet-stream' -InFile $File.FullName | Out-Null
+}
+
+function Get-ReleaseAssetText {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repository,
+        [Parameter(Mandatory = $true)][string]$ReleaseTag,
+        [Parameter(Mandatory = $true)][string]$AssetName,
+        [Parameter(Mandatory = $true)][string]$Token
+    )
+
+    $release = Get-ReleaseByTag -Repository $Repository -ReleaseTag $ReleaseTag -Token $Token
+    if (-not $release) {
+        return $null
+    }
+    $asset = $release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
+    if (-not $asset) {
+        return $null
+    }
+    $headers = @{
+        Authorization = "Bearer $Token"
+        Accept = 'application/octet-stream'
+        'User-Agent' = 'torch-py-builder-local-cuda'
+        'X-GitHub-Api-Version' = '2022-11-28'
+    }
+    return Invoke-RestMethod -Method GET -Uri $asset.browser_download_url -Headers $headers
+}
+
+function Merge-Sha256SumsFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$AssetsDirectory,
+        [Parameter(Mandatory = $true)][string]$Repository,
+        [Parameter(Mandatory = $true)][string]$ReleaseTag,
+        [Parameter(Mandatory = $true)][string]$Token
+    )
+
+    $localLines = @{}
+    foreach ($asset in Get-ChildItem -Path $AssetsDirectory -File -Filter '*.whl') {
+        $hash = (Get-FileHash -Path $asset.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $localLines[$asset.Name] = "$hash  $($asset.Name)"
+    }
+
+    $merged = @{}
+    try {
+        $existing = Get-ReleaseAssetText -Repository $Repository -ReleaseTag $ReleaseTag -AssetName 'SHA256SUMS.txt' -Token $Token
+        if ($existing) {
+            foreach ($line in ($existing -split "`n")) {
+                $trimmed = $line.Trim()
+                if ($trimmed) {
+                    $name = ($trimmed -split '\s+', 2)[-1]
+                    $merged[$name] = $trimmed
+                }
+            }
+        }
+    }
+    catch {
+        Write-Step "No existing SHA256SUMS.txt to merge: $($_.Exception.Message)"
+    }
+
+    foreach ($entry in $localLines.GetEnumerator()) {
+        $merged[$entry.Key] = $entry.Value
+    }
+
+    $checksumPath = Join-Path $AssetsDirectory 'SHA256SUMS.txt'
+    $lines = $merged.GetEnumerator() | Sort-Object Name | ForEach-Object { $_.Value }
+    Set-Content -Path $checksumPath -Value $lines -Encoding utf8
+    return $checksumPath
 }
 
 function Publish-ReleaseAssets {
@@ -347,17 +459,26 @@ function Publish-ReleaseAssets {
         [Parameter(Mandatory = $true)][string]$ReleaseTag,
         [Parameter(Mandatory = $true)][string]$TorchVersion,
         [Parameter(Mandatory = $true)][string]$AssetsDirectory,
-        [Parameter(Mandatory = $true)][string]$Token
+        [Parameter(Mandatory = $true)][string]$Token,
+        [switch]$CudaOnly
     )
 
+    $script:ReleaseTag = $ReleaseTag
     $release = Get-OrCreateRelease -Repository $Repository -ReleaseTag $ReleaseTag -TorchVersion $TorchVersion -Token $Token
     $files = Get-ChildItem -Path $AssetsDirectory -File | Where-Object {
-        $_.Extension -eq '.whl' -or $_.Name -eq 'SHA256SUMS.txt'
-    } | Sort-Object Name
+        $_.Extension -eq '.whl'
+    }
+    if ($CudaOnly) {
+        $files = $files | Where-Object { $_.Name -match 'linux_x86_64|win_amd64' }
+    }
+    $files = $files | Sort-Object Name
 
     foreach ($file in $files) {
         Upload-ReleaseAsset -Release $release -File $file -Repository $Repository -Token $Token
     }
+
+    $checksumPath = Merge-Sha256SumsFile -AssetsDirectory $AssetsDirectory -Repository $Repository -ReleaseTag $ReleaseTag -Token $Token
+    Upload-ReleaseAsset -Release $release -File (Get-Item $checksumPath) -Repository $Repository -Token $Token
 }
 
 $repoRoot = Get-RepoRoot
@@ -377,13 +498,12 @@ if (-not $PythonVersions -or $PythonVersions.Count -eq 0) {
     $PythonVersions = @($buildMatrix.python_versions)
 }
 
-$buildRoot = Join-Path $repoRoot 'build\local-cuda'
-$artifactRoot = Join-Path $buildRoot 'release-assets'
+$buildRoot = 'C:\tpb-cuda'
+$artifactRoot = Join-Path $repoRoot 'build\local-cuda\release-assets'
 $windowsWorkRoot = Join-Path $buildRoot 'windows-work'
 $windowsVenvRoot = Join-Path $buildRoot 'venvs'
 
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
-Get-ChildItem -Path $artifactRoot -File -ErrorAction SilentlyContinue | Remove-Item -Force
 New-Item -ItemType Directory -Force -Path $windowsWorkRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $windowsVenvRoot | Out-Null
 
@@ -391,7 +511,10 @@ $companionVersions = Resolve-CompanionVersions -TorchVersion $TorchVersion -Repo
 
 Write-Step "Local CUDA build plan | target_os=$TargetOs | python_versions=$($PythonVersions -join ',') | torch=$TorchVersion | release_tag=$ReleaseTag | repository=$Repository"
 
-if ($TargetOs -in @('both', 'windows')) {
+if ($UploadOnly) {
+    Write-Step 'Upload-only mode: skipping builds'
+}
+elseif ($TargetOs -in @('both', 'windows')) {
     Import-VsDevEnvironment
 
     foreach ($pythonVersion in $PythonVersions) {
@@ -420,9 +543,16 @@ if ($TargetOs -in @('both', 'windows')) {
     }
 }
 
-if ($TargetOs -in @('both', 'linux')) {
+if (-not $UploadOnly -and $TargetOs -in @('both', 'linux')) {
     if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
         throw 'WSL2 is required for Linux CUDA builds from Windows.'
+    }
+
+    if (-not $WslWorkRoot) {
+        $quotedWslWorkRoot = ''
+    }
+    else {
+        $quotedWslWorkRoot = ConvertTo-BashSingleQuoted $WslWorkRoot
     }
 
     $wslRepoRoot = Convert-WindowsPathToWsl -WindowsPath $repoRoot
@@ -430,20 +560,12 @@ if ($TargetOs -in @('both', 'linux')) {
 
     foreach ($pythonVersion in $PythonVersions) {
         $pyNoDot = $pythonVersion -replace '\.', ''
-        $linuxVenvPath = "$WslWorkRoot/venvs/linux-py$pyNoDot"
-        $linuxWorkPath = "$WslWorkRoot/work/linux-py$pyNoDot"
         $bootstrapSuffix = ''
         if ($BootstrapSystemDependencies) {
             $bootstrapSuffix = ' --bootstrap-system-deps'
         }
 
         $quotedWslRepoRoot = ConvertTo-BashSingleQuoted $wslRepoRoot
-        $quotedWslWorkRoot = ConvertTo-BashSingleQuoted $WslWorkRoot
-        $quotedWslVenvRoot = ConvertTo-BashSingleQuoted "$WslWorkRoot/venvs"
-        $quotedWslBuildRoot = ConvertTo-BashSingleQuoted "$WslWorkRoot/work"
-        $quotedLinuxVenvPython = ConvertTo-BashSingleQuoted "$linuxVenvPath/bin/python"
-        $quotedLinuxVenvPath = ConvertTo-BashSingleQuoted $linuxVenvPath
-        $quotedLinuxWorkPath = ConvertTo-BashSingleQuoted $linuxWorkPath
         $quotedPythonVersion = ConvertTo-BashSingleQuoted $pythonVersion
         $quotedTorchVersion = ConvertTo-BashSingleQuoted $TorchVersion
         $quotedTorchvisionVersion = ConvertTo-BashSingleQuoted $companionVersions.torchvision_version
@@ -451,13 +573,25 @@ if ($TargetOs -in @('both', 'linux')) {
         $quotedReleaseTag = ConvertTo-BashSingleQuoted $ReleaseTag
         $quotedWslArtifactRoot = ConvertTo-BashSingleQuoted $wslArtifactRoot
 
+        $workRootLine = if ($quotedWslWorkRoot) {
+            "WSL_WORK_ROOT=$quotedWslWorkRoot"
+        }
+        else {
+            'WSL_WORK_ROOT="$HOME/tcuda"'
+        }
+
         $commandText = @(
             'set -euo pipefail',
+            'export CUDA_HOME=/usr/local/cuda',
+            'export PATH="$CUDA_HOME/bin:$PATH"',
+            $workRootLine,
+            'mkdir -p "$WSL_WORK_ROOT" "$WSL_WORK_ROOT/venvs" "$WSL_WORK_ROOT/w"',
+            "LINUX_VENV=`"`$WSL_WORK_ROOT/venvs/linux-py$pyNoDot`"",
+            "LINUX_WORK=`"`$WSL_WORK_ROOT/w$pyNoDot`"",
+            "if [ ! -x `"`$LINUX_VENV/bin/python`" ]; then python$pythonVersion -m venv `"`$LINUX_VENV`"; fi",
             "cd $quotedWslRepoRoot",
-            "mkdir -p $quotedWslWorkRoot $quotedWslVenvRoot $quotedWslBuildRoot",
-            "if [ ! -x $quotedLinuxVenvPython ]; then python$pythonVersion -m venv $quotedLinuxVenvPath; fi",
-            "$quotedLinuxVenvPython scripts/build_cuda_local.py --target-os linux --python-version $quotedPythonVersion --torch-version $quotedTorchVersion --torchvision-version $quotedTorchvisionVersion --torchaudio-version $quotedTorchaudioVersion --release-tag $quotedReleaseTag --work-root $quotedLinuxWorkPath --artifact-root $quotedWslArtifactRoot$bootstrapSuffix"
-        ) -join '; '
+            "`"`$LINUX_VENV/bin/python`" scripts/build_cuda_local.py --target-os linux --python-version $quotedPythonVersion --torch-version $quotedTorchVersion --torchvision-version $quotedTorchvisionVersion --torchaudio-version $quotedTorchaudioVersion --release-tag $quotedReleaseTag --work-root `"`$LINUX_WORK`" --artifact-root $quotedWslArtifactRoot$bootstrapSuffix"
+        ) -join "`n"
 
         Invoke-WslBash -CommandText $commandText
     }
@@ -468,7 +602,7 @@ Write-Step "Generated checksums at $checksumPath"
 
 if (-not $SkipUpload) {
     $token = Get-GitHubToken -ExplicitToken $GitHubToken
-    Publish-ReleaseAssets -Repository $Repository -ReleaseTag $ReleaseTag -TorchVersion $TorchVersion -AssetsDirectory $artifactRoot -Token $token
+    Publish-ReleaseAssets -Repository $Repository -ReleaseTag $ReleaseTag -TorchVersion $TorchVersion -AssetsDirectory $artifactRoot -Token $token -CudaOnly
     Write-Step 'Release upload completed'
 }
 else {
