@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "release_tag": "torch-2.11.0",
-  "release_reason": "initial-release",
-  "released_at_utc": "2026-04-30T06:37:41.201014+00:00",
+  "release_reason": "fill-missing",
+  "released_at_utc": "2026-06-20T10:05:35.162388+00:00",
   "torch_version": "2.11.0",
-  "previous_version": "",
-  "build_source_commit": "69476fe17a9a526e7ab86444bab617e16a2dcead",
+  "previous_version": "2.11.0",
+  "build_source_commit": "2e336fd1b3d95b7461e623eaf7842677460460b4",
   "workflow_run": {
-    "id": "25149163480",
-    "url": "https://github.com/FarisZahrani/torch-py-builder/actions/runs/25149163480",
+    "id": "27864874660",
+    "url": "https://github.com/FarisZahrani/torch-py-builder/actions/runs/27864874660",
     "repository": "FarisZahrani/torch-py-builder",
     "event_name": "workflow_dispatch"
   }
