@@ -443,11 +443,17 @@ def run_python_inline(code: str, *, cwd: Path, env: dict[str, str] | None = None
     run_command([sys.executable, "-c", code], cwd=cwd, env=merged_env, label=label)
 
 
-def run_smoke_test(code: str, *, cwd: Path, label: str) -> None:
+def run_smoke_test(
+    code: str,
+    *,
+    cwd: Path,
+    label: str,
+    env: dict[str, str] | None = None,
+) -> None:
     smoke_script = cwd / ".cuda_smoke_test.py"
     smoke_script.write_text(code, encoding="utf-8")
     try:
-        run_command([sys.executable, str(smoke_script)], cwd=cwd, label=label)
+        run_command([sys.executable, str(smoke_script)], cwd=cwd, env=env, label=label)
     finally:
         smoke_script.unlink(missing_ok=True)
 
@@ -528,12 +534,57 @@ def build_environment(target_os: str, torch_version: str, cuda_home: str, work_r
     return environment
 
 
+def wheel_has_bundled_cuda_runtime(wheel_path: Path) -> bool:
+    import zipfile
+
+    with zipfile.ZipFile(wheel_path, "r") as archive:
+        for name in archive.namelist():
+            normalized = name.replace("\\", "/")
+            if "/torch/lib/" in normalized and normalized.lower().endswith(".dll"):
+                if Path(name).name.lower().startswith("cudart64_"):
+                    return True
+    return False
+
+
+def bundle_windows_torch_wheel(
+    wheel_path: Path,
+    cuda_home: str,
+    pytorch_src: Path | None,
+) -> None:
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "bundle_windows_cuda_dlls.py"),
+        "--wheel",
+        str(wheel_path),
+        "--cuda-home",
+        cuda_home,
+    ]
+    if pytorch_src is not None:
+        command.extend(["--pytorch-src", str(pytorch_src)])
+    run_command(command, cwd=REPO_ROOT, label="Bundle CUDA runtime DLLs into torch wheel")
+
+
+def run_isolated_windows_import_test(cwd: Path, label: str) -> None:
+    run_command(
+        [sys.executable, str(REPO_ROOT / "scripts" / "verify_isolated_torch_import.py")],
+        cwd=cwd,
+        label=label,
+    )
+
+
 def build_torch(args: argparse.Namespace, target_os: str, work_root: Path, artifact_root: Path) -> Path:
     platform_tag = "win_amd64" if target_os == "windows" else "linux_x86_64"
     wheel_name = f"torch-{args.torch_version}-{python_tag()}-{python_tag()}-{platform_tag}.whl"
     existing_wheel = artifact_root / wheel_name
     if existing_wheel.exists():
         cuda_home = ensure_cuda_home(target_os)
+        source_dir = work_root / f"pytorch-src-v{args.torch_version}"
+        if target_os == "windows" and not wheel_has_bundled_cuda_runtime(existing_wheel):
+            bundle_windows_torch_wheel(
+                existing_wheel,
+                cuda_home,
+                source_dir if source_dir.exists() else None,
+            )
         smoke_code = (
             dll_load_preamble() + "import torch\n"
             "assert torch.version.cuda is not None\n"
@@ -551,6 +602,11 @@ def build_torch(args: argparse.Namespace, target_os: str, work_root: Path, artif
                 cwd=work_root,
                 label=f"Reuse existing torch wheel ({target_os})",
             )
+            if target_os == "windows":
+                run_isolated_windows_import_test(
+                    work_root,
+                    label=f"Isolated import smoke test torch ({target_os})",
+                )
             log(f"Reusing validated torch wheel: {existing_wheel.name}")
             return existing_wheel
         except RuntimeError:
@@ -615,6 +671,8 @@ def build_torch(args: argparse.Namespace, target_os: str, work_root: Path, artif
     show_sccache_stats(work_root)
 
     wheel_path = selected_wheel(source_dir / "dist", python_tag())
+    if target_os == "windows":
+        bundle_windows_torch_wheel(wheel_path, cuda_home, source_dir)
     copied_wheel = copy_to_artifacts(wheel_path, artifact_root)
     validate_wheel_structure(copied_wheel, args.torch_version)
 
@@ -638,6 +696,11 @@ def build_torch(args: argparse.Namespace, target_os: str, work_root: Path, artif
     # Run outside the source tree so imports resolve to the installed wheel.
     prepare_host_for_smoke_test(target_os, cuda_home)
     run_smoke_test(smoke_code, cwd=work_root, label=f"Smoke test torch ({target_os})")
+    if target_os == "windows":
+        run_isolated_windows_import_test(
+            work_root,
+            label=f"Isolated import smoke test torch ({target_os})",
+        )
     return copied_wheel
 
 

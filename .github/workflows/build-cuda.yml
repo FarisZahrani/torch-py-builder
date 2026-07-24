@@ -752,6 +752,17 @@ jobs:
           echo "Built wheels:"
           ls -lh dist/
 
+      - name: Bundle CUDA runtime DLLs into torch wheel (Windows)
+        if: matrix.target_os == 'windows'
+        shell: pwsh
+        run: |
+          $wheel = '${{ steps.collect-built-wheel.outputs.selected_wheel_path }}'
+          if (-not (Test-Path $wheel)) { throw "No wheel found at $wheel" }
+          python scripts/bundle_windows_cuda_dlls.py `
+            --wheel $wheel `
+            --cuda-home $env:CUDA_PATH `
+            --pytorch-src pytorch-src
+
       - name: Verify built wheel tag
         shell: bash
         run: |
@@ -814,6 +825,7 @@ jobs:
               traceback.print_exc()
               raise
           "
+          python scripts/verify_isolated_torch_import.py
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v7
