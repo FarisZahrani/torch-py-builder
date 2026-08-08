@@ -609,4 +609,4 @@ else {
     Write-Step 'Skipping release upload by request'
 }
 
-Write-Step 'Local CUDA build workflow completed'
+Write-Step 'Local CUDA build completed'

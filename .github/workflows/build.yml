@@ -184,7 +184,7 @@ jobs:
               raise SystemExit(
                   "CPU/MPS workflow received unsupported backend(s): "
                   + ", ".join(sorted(unsupported_backends))
-                  + ". Use the separate local CUDA workflow."
+                  + ". Use the local CUDA tooling."
               )
 
           include = []
