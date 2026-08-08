@@ -7,11 +7,24 @@ import json
 import os
 import re
 import sys
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 RELEASE_TAG_PATTERN = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 PYTORCH_RELEASES_URL = "https://api.github.com/repos/pytorch/pytorch/releases"
+PYTORCH_COMMITS_URL = "https://api.github.com/repos/pytorch/pytorch/commits"
+
+
+def github_headers() -> dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "torch-py-builder/1.0",
+    }
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 def fetch_releases() -> list[dict]:
@@ -19,14 +32,7 @@ def fetch_releases() -> list[dict]:
     page = 1
     while True:
         url = f"{PYTORCH_RELEASES_URL}?per_page=100&page={page}"
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "torch-py-builder/1.0",
-        }
-        token = os.environ.get("GITHUB_TOKEN", "").strip()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        req = urllib.request.Request(url, headers=headers)
+        req = urllib.request.Request(url, headers=github_headers())
         with urllib.request.urlopen(req, timeout=30) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
         if not payload:
@@ -67,9 +73,25 @@ def latest_stable_release(releases: list[dict]) -> dict:
     return {
         "version": version,
         "tag": tag,
-        "tag_commit_sha": best_release.get("target_commitish", ""),
+        # The release API's target_commitish is often just "main". The
+        # caller replaces this with the immutable commit resolved from the tag.
+        "tag_commit_sha": "",
         "release_url": best_release.get("html_url", ""),
     }
+
+
+def resolve_tag_commit_sha(tag: str) -> str:
+    """Resolve a release tag to its immutable commit SHA."""
+    encoded_tag = urllib.parse.quote(tag, safe="")
+    url = f"{PYTORCH_COMMITS_URL}/{encoded_tag}"
+    request = urllib.request.Request(url, headers=github_headers())
+    with urllib.request.urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    sha = payload.get("sha", "")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+        raise RuntimeError(f"GitHub returned no immutable commit SHA for PyTorch tag {tag!r}.")
+    return sha
 
 
 def main() -> None:
@@ -100,6 +122,7 @@ def main() -> None:
     else:
         releases = fetch_releases()
         result = latest_stable_release(releases)
+        result["tag_commit_sha"] = resolve_tag_commit_sha(result["tag"])
 
     output_json = json.dumps(result, indent=2)
 

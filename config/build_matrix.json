@@ -8,22 +8,10 @@
       "backend": "cpu"
     },
     {
-      "runner": "ubuntu-22.04",
-      "target_os": "linux",
-      "target_arch": "x86_64",
-      "backend": "cuda"
-    },
-    {
       "runner": "windows-2022",
       "target_os": "windows",
       "target_arch": "x86_64",
       "backend": "cpu"
-    },
-    {
-      "runner": "windows-2022",
-      "target_os": "windows",
-      "target_arch": "x86_64",
-      "backend": "cuda"
     },
     {
       "runner": "macos-15-intel",

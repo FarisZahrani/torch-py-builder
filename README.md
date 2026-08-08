@@ -11,7 +11,7 @@ This repository builds `torch`, `torchvision`, and `torchaudio` from source and 
 | macOS (Intel)     | x86\_64      | macos-15-intel  |
 | macOS (Apple Silicon) | arm64   | macos-14        |
 
-Linux and Windows builds include both CPU and CUDA (12.4) variants. macOS Intel is CPU-only. macOS Apple Silicon uses MPS (Metal Performance Shaders).
+Linux and Windows GitHub Actions builds are CPU-only. macOS Intel is CPU-only, and macOS Apple Silicon uses MPS (Metal Performance Shaders). CUDA 12.4 wheels are built separately with the local CUDA tooling because hosted GitHub Actions runners are not the supported CUDA build environment.
 
 ## Configuration
 
@@ -42,7 +42,7 @@ Edit this file to add or remove Python versions or platforms.
 Each GitHub release uses a single torch-based tag such as `torch-2.7.0`.
 
 - `torch`, `torchvision`, and `torchaudio` are published as separate wheel files under that same release.
-- torchvision and torchaudio versions are resolved to match the torch version for the release.
+- Companion versions are resolved from verified upstream compatibility rules. They do not always have the same version number as torch: for PyTorch 2.13, the supported sources are TorchVision 0.28.0 and TorchAudio 2.11.0.
 - Companion wheels are built against the matching torch wheel for the same OS, architecture, backend, and Python version.
 
 ## Release State
@@ -65,7 +65,7 @@ Use the **Build PyTorch Family Wheels** workflow with `workflow_dispatch` to:
 | `resolve_latest_torch.py`  | Fetch the latest stable PyTorch release from GitHub |
 | `plan_release.py`          | Compare the resolved torch version to state and decide whether to build a shared release |
 | `update_release_state.py`  | Write `release-state/latest.json` and history snapshots for a shared release |
-| `resolve_companion_versions.py` | Resolve matching torchvision and torchaudio versions for a torch release |
+| `resolve_companion_versions.py` | Resolve compatible torchvision and torchaudio versions and source tags for a torch release |
 | `validate_wheel.py`        | Structural validation of a built package `.whl` file |
 | `build_cuda_local.py`      | Build local CUDA `torch`, `torchvision`, and `torchaudio` wheels for the current OS |
 | `build_cuda_local.ps1`     | Orchestrate native Windows and WSL2 Linux CUDA builds, then upload finished wheels to GitHub Releases |
@@ -78,6 +78,18 @@ Use `scripts/build_cuda_local.ps1` from Windows to build CUDA wheels for Linux (
 - Builds Linux CUDA wheels inside WSL2
 - Reuses `release-state/latest.json` to default the torch version, release tag, and repository
 - Uploads the finished wheel files plus `SHA256SUMS.txt` to the matching GitHub release tag
+
+### Upstream compatibility
+
+The builder uses source tags from the official PyTorch repositories:
+
+| PyTorch | TorchVision | TorchAudio | Notes |
+|----------|-------------|------------|-------|
+| 2.11.x | 0.26.x | 2.11.0 | TorchAudio 2.11 stable ABI begins here |
+| 2.12.x | 0.27.x | 2.11.0 | TorchAudio 2.11 remains compatible |
+| 2.13.x | 0.28.x | 2.11.0 | There is no official TorchAudio 2.13 tag |
+
+TorchAudio 2.11 is the latest upstream release and is documented as compatible with PyTorch 2.11 and later. The resolver fails closed when a PyTorch release has no verified TorchVision mapping or source tags.
 
 Example:
 

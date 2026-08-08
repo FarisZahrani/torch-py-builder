@@ -35,10 +35,15 @@ jobs:
           payload = json.loads(Path("resolved.json").read_text(encoding="utf-8"))
           assert "version" in payload, "missing 'version' field"
           assert "tag" in payload, "missing 'tag' field"
+          assert "tag_commit_sha" in payload, "missing 'tag_commit_sha' field"
           version = payload["version"]
           parts = version.split(".")
           assert len(parts) >= 2, f"version has too few parts: {version}"
           assert all(p.isdigit() for p in parts), f"non-numeric version parts: {version}"
+          commit_sha = payload["tag_commit_sha"]
+          assert len(commit_sha) == 40 and all(
+              c in "0123456789abcdefABCDEF" for c in commit_sha
+          ), f"tag_commit_sha is not immutable: {commit_sha!r}"
           print(f"Resolved PyTorch version: {version}")
 
   script-smoke:
@@ -56,6 +61,9 @@ jobs:
 
       - name: Compile Python scripts
         run: python -m compileall scripts
+
+      - name: Run resolver unit tests
+        run: python -m unittest tests.test_companion_source -v
 
       - name: Smoke test script CLIs
         run: |
@@ -165,12 +173,19 @@ jobs:
           assert derive_torchvision_version("2.11.0") == "0.26.0"
           assert derive_torchaudio_version("2.11.0") == "2.11.0"
           assert derive_torchvision_version("2.12.0") == "0.27.0"
-          assert derive_torchaudio_version("2.12.0") == "2.12.0"
+          assert derive_torchaudio_version("2.12.0") == "2.11.0"
+          assert derive_torchvision_version("2.13.0") == "0.28.0"
+          assert derive_torchaudio_version("2.13.0") == "2.11.0"
 
       - name: Verify torch 2.11.0 companion source tags exist
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python scripts/check_build_readiness.py --torch-version 2.11.0
+
+      - name: Verify torch 2.13.0 companion source tags exist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/check_build_readiness.py --torch-version 2.13.0
 
   plan-smoke:
     runs-on: ubuntu-latest

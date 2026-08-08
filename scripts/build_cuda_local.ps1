@@ -303,7 +303,7 @@ function New-ReleaseBody {
     )
 
     return @"
-Source-built torch $TorchVersion, matching torchvision, and matching torchaudio wheels for platforms and Python versions not covered by official PyPI releases.
+Source-built torch $TorchVersion, with compatible torchvision and torchaudio wheels for platforms and Python versions not covered by official PyPI releases.
 
 Package Layout
 - The release tag is shared across the full package family and remains torch-based.

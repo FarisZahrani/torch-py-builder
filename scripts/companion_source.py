@@ -18,6 +18,33 @@ REPO_CONFIG = {
     "torchaudio": "pytorch/audio",
 }
 
+# TorchVision follows the PyTorch minor release line, but the relationship is
+# a compatibility contract rather than an arithmetic rule. Keep the supported
+# releases explicit so a new upstream release cannot silently select an
+# unverified source tag.
+TORCHVISION_MINOR_VERSIONS = {
+    (2, 0): (0, 15),
+    (2, 1): (0, 16),
+    (2, 2): (0, 17),
+    (2, 3): (0, 18),
+    (2, 4): (0, 19),
+    (2, 5): (0, 20),
+    (2, 6): (0, 21),
+    (2, 7): (0, 22),
+    (2, 8): (0, 23),
+    (2, 9): (0, 24),
+    (2, 10): (0, 25),
+    (2, 11): (0, 26),
+    (2, 12): (0, 27),
+    (2, 13): (0, 28),
+}
+
+# TorchAudio 2.11 is built against a stable PyTorch ABI and is explicitly
+# compatible with PyTorch 2.11 and later. There is intentionally no
+# torchaudio 2.12/2.13 source tag to resolve.
+TORCHAUDIO_STABLE_ABI_MIN_TORCH = (2, 11, 0)
+TORCHAUDIO_STABLE_ABI_VERSION = "2.11.0"
+
 
 def parse_version(version: str) -> tuple[int, int, int]:
     match = VERSION_RE.match(version.strip())
@@ -30,10 +57,11 @@ def derive_torchvision_version(torch_version: str) -> str:
     major, minor, patch = parse_version(torch_version)
     if major == 1:
         return f"0.{minor + 1}.{patch}"
-    if major == 2:
-        return f"0.{minor + 15}.{patch}"
+    if major == 2 and (major, minor) in TORCHVISION_MINOR_VERSIONS:
+        vision_major, vision_minor = TORCHVISION_MINOR_VERSIONS[(major, minor)]
+        return f"{vision_major}.{vision_minor}.{patch}"
     raise ValueError(
-        "Automatic torchvision version mapping is only defined for torch 1.x and 2.x releases."
+        f"No verified torchvision compatibility mapping exists for torch {torch_version}."
     )
 
 
@@ -41,10 +69,12 @@ def derive_torchaudio_version(torch_version: str) -> str:
     major, minor, patch = parse_version(torch_version)
     if major == 1:
         return f"0.{minor}.{patch}"
+    if major == 2 and (major, minor, patch) >= TORCHAUDIO_STABLE_ABI_MIN_TORCH:
+        return TORCHAUDIO_STABLE_ABI_VERSION
     if major == 2:
         return f"{major}.{minor}.{patch}"
     raise ValueError(
-        "Automatic torchaudio version mapping is only defined for torch 1.x and 2.x releases."
+        f"No verified torchaudio compatibility mapping exists for torch {torch_version}."
     )
 
 

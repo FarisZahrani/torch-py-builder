@@ -43,7 +43,6 @@ on:
         options:
           - any
           - cpu
-          - cuda
           - mps
       python_version_filter:
         description: "Optional Python version filter (e.g. 3.13)."
@@ -170,13 +169,23 @@ jobs:
 
           valid_os = {"any", "linux", "windows", "macos"}
           valid_arch = {"any", "x86_64", "arm64"}
-          valid_backends = {"any", "cpu", "cuda", "mps"}
+          valid_backends = {"any", "cpu", "mps"}
           if target_os_filter not in valid_os:
               raise SystemExit(f"Invalid target_os_filter: {target_os_filter}")
           if target_arch_filter not in valid_arch:
               raise SystemExit(f"Invalid target_arch_filter: {target_arch_filter}")
           if backend_filter not in valid_backends:
               raise SystemExit(f"Invalid backend_filter: {backend_filter}")
+
+          unsupported_backends = {
+              target.get("backend", "cpu") for target in targets
+          } - {"cpu", "mps"}
+          if unsupported_backends:
+              raise SystemExit(
+                  "CPU/MPS workflow received unsupported backend(s): "
+                  + ", ".join(sorted(unsupported_backends))
+                  + ". Use the separate local CUDA workflow."
+              )
 
           include = []
           for target in targets:
@@ -1723,14 +1732,14 @@ jobs:
           overwrite_files: true
           generate_release_notes: false
           body: |
-            Source-built **torch ${{ needs.check-upstream.outputs.torch_version }}**, matching torchvision, and matching torchaudio wheels for platforms and Python versions not covered by official PyPI releases.
+            Source-built **torch ${{ needs.check-upstream.outputs.torch_version }}**, with compatible torchvision and torchaudio wheels for platforms and Python versions not covered by official PyPI releases.
 
             ### Package Layout
             - The release tag is shared across the full package family and remains torch-based.
             - `torch`, `torchvision`, and `torchaudio` are published as separate wheel files.
-            - Each torchvision and torchaudio wheel is built against the matching torch wheel for the same matrix entry.
+            - Each torchvision and torchaudio wheel is built against the corresponding torch wheel for the same matrix entry.
             - This workflow publishes CPU and MPS assets first.
-            - The follow-up CUDA workflow appends any missing CUDA assets to the same release tag.
+            - CUDA assets are built separately with the local CUDA tooling and can be appended to the same release tag.
 
             ### Platforms & Backends
             | Platform | Backend |
@@ -1746,25 +1755,6 @@ jobs:
             ### Notes
             - These wheels preserve the normal package split: install `torch`, `torchvision`, and `torchaudio` separately as needed.
             - The torch wheel keeps the same API surface as official PyPI torch wheels.
-            - CUDA wheels include compiled CUDA kernels. A physical NVIDIA GPU is required at runtime for GPU acceleration.
             - MPS wheels use Apple Metal for GPU acceleration on Apple Silicon.
             - Torch is built from the official PyTorch source at tag `v${{ needs.check-upstream.outputs.torch_version }}`.
           files: release-assets/*
-
-      - name: Dispatch CUDA follow-up workflow
-        uses: actions/github-script@v8
-        with:
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'build-cuda.yml',
-              ref: context.ref.replace('refs/heads/', ''),
-              inputs: {
-                force_rebuild: 'false',
-                target_os_filter: 'any',
-                target_arch_filter: 'any',
-                python_version_filter: '',
-                release_tag: '${{ needs.check-upstream.outputs.release_tag }}',
-              },
-            })

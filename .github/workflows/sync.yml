@@ -51,8 +51,7 @@ jobs:
           TORCH_VERSION=$(jq -r '.version' resolved.json)
           python scripts/check_build_readiness.py \
             --torch-version "${TORCH_VERSION}" \
-            --github-output "$GITHUB_OUTPUT" \
-            --exit-zero
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Check if release tag already exists
         id: check
@@ -91,11 +90,18 @@ jobs:
 
           PAYLOAD='{"ref":"${{ github.ref_name }}","inputs":{"force_rebuild":"false"}}'
 
-          curl -sS -L \
+          HTTP_STATUS=$(curl -sS -L \
             -X POST \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
+            -o /dev/null \
+            -w "%{http_code}" \
             "${{ github.api_url }}/repos/${{ github.repository }}/actions/workflows/build.yml/dispatches" \
-            -d "${PAYLOAD}"
+            -d "${PAYLOAD}")
+
+          if [ "${HTTP_STATUS}" != "204" ]; then
+            echo "Build workflow dispatch failed with HTTP ${HTTP_STATUS}." >&2
+            exit 1
+          fi
 
           echo "Build workflow dispatched for PyTorch ${TORCH_VERSION}."

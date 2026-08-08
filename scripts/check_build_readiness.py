@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check whether torch, torchvision, and torchaudio source tags exist for a build."""
+"""Check whether compatible torch-family source tags exist for a build."""
 from __future__ import annotations
 
 import argparse
@@ -11,7 +11,7 @@ from companion_source import resolve_companion_sources
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Verify companion source repositories have tags for a torch release."
+        description="Verify compatible companion source repositories have tags for a torch release."
     )
     parser.add_argument("--torch-version", required=True, help="Torch version to check.")
     parser.add_argument(

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve torchvision and torchaudio versions that match a torch release."""
+"""Resolve torchvision and torchaudio versions compatible with a torch release."""
 from __future__ import annotations
 
 import argparse
@@ -12,9 +12,9 @@ from companion_source import resolve_companion_sources
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Resolve torchvision and torchaudio versions for a torch release."
+        description="Resolve compatible torchvision and torchaudio versions for a torch release."
     )
-    parser.add_argument("--torch-version", required=True, help="Torch version to match.")
+    parser.add_argument("--torch-version", required=True, help="Torch version to resolve companions for.")
     parser.add_argument(
         "--output",
         help="Optional output JSON path. If omitted, prints JSON to stdout.",
