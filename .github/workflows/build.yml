@@ -616,6 +616,7 @@ jobs:
           USE_CUDA: "0"
           USE_ROCM: "0"
           USE_MKLDNN: "0"
+          USE_MPS: "0"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
           MAX_JOBS: "3"
@@ -637,12 +638,12 @@ jobs:
           USE_CUDA: "0"
           USE_ROCM: "0"
           USE_MKLDNN: "0"
+          USE_MPS: "0"
           USE_NUMPY: "1"
           BUILD_TEST: "0"
           MAX_JOBS: "3"
           MACOSX_DEPLOYMENT_TARGET: "10.15"
           CMAKE_OSX_ARCHITECTURES: "x86_64"
-          CMAKE_FRESH: "1"
         run: |
           PYTHON_BIN=$(python -c "import sys; print(sys.executable)")
           PYTHON_TAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
@@ -683,7 +684,6 @@ jobs:
           BUILD_TEST: "0"
           MAX_JOBS: "4"
           CMAKE_GENERATOR: "Ninja"
-          CMAKE_FRESH: "1"
         run: |
           $pythonExe = python -c "import sys; print(sys.executable)"
           $pythonTag = python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"
