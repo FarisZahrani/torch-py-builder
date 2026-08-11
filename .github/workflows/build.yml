@@ -396,7 +396,7 @@ jobs:
         if: matrix.backend == 'cuda'
         uses: Jimver/cuda-toolkit@v0.2.29
         with:
-          cuda: '12.4.1'
+          cuda: '12.8.0'
           method: 'network'
 
       - name: Discover CUDA home (Linux CUDA)
@@ -531,7 +531,11 @@ jobs:
           BUILD_TEST: "0"
           MAX_JOBS: "3"
           CUDA_HOME: ${{ steps.cuda_home.outputs.cuda_root }}
-          TORCH_CUDA_ARCH_LIST: "5.0;6.0;7.0;7.5;8.0;8.6;8.9;9.0+PTX"
+          TORCH_CUDA_ARCH_LIST: "5.0;5.2;6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0+PTX"
+          USE_CUDNN: "0"
+          USE_CUSPARSELT: "0"
+          USE_FLASH_ATTENTION: "0"
+          USE_MEM_EFF_ATTENTION: "0"
         run: |
           PYTHON_BIN=$(python -c "import sys; print(sys.executable)")
           PYTHON_TAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
@@ -553,7 +557,11 @@ jobs:
           BUILD_TEST: "0"
           MAX_JOBS: "3"
           CUDA_HOME: ${{ steps.cuda_home.outputs.cuda_root }}
-          TORCH_CUDA_ARCH_LIST: "5.0;6.0;7.0;7.5;8.0;8.6;8.9;9.0+PTX"
+          TORCH_CUDA_ARCH_LIST: "5.0;5.2;6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0+PTX"
+          USE_CUDNN: "0"
+          USE_CUSPARSELT: "0"
+          USE_FLASH_ATTENTION: "0"
+          USE_MEM_EFF_ATTENTION: "0"
           CMAKE_FRESH: "1"
         run: |
           PYTHON_BIN=$(python -c "import sys; print(sys.executable)")
@@ -609,29 +617,7 @@ jobs:
           export DESIRED_PYTHON="$PYTHON_TAG"
           python -m build --wheel --no-isolation
 
-      - name: Build libtorch (macOS x86_64 CPU)
-        if: matrix.target_os == 'macos' && matrix.target_arch == 'x86_64'
-        working-directory: pytorch-src
-        env:
-          USE_CUDA: "0"
-          USE_ROCM: "0"
-          USE_MKLDNN: "0"
-          USE_MPS: "0"
-          USE_NUMPY: "1"
-          BUILD_TEST: "0"
-          MAX_JOBS: "3"
-          MACOSX_DEPLOYMENT_TARGET: "10.15"
-          CMAKE_OSX_ARCHITECTURES: "x86_64"
-        run: |
-          PYTHON_BIN=$(python -c "import sys; print(sys.executable)")
-          PYTHON_TAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
-          export PYTHON_EXECUTABLE="$PYTHON_BIN"
-          export Python_EXECUTABLE="$PYTHON_BIN"
-          export Python3_EXECUTABLE="$PYTHON_BIN"
-          export DESIRED_PYTHON="$PYTHON_TAG"
-          python tools/build_libtorch.py
-
-      - name: Build wheel from libtorch (macOS x86_64 CPU)
+      - name: Build torch wheel (macOS x86_64 CPU)
         if: matrix.target_os == 'macos' && matrix.target_arch == 'x86_64'
         working-directory: pytorch-src
         env:
@@ -653,27 +639,7 @@ jobs:
           export DESIRED_PYTHON="$PYTHON_TAG"
           python -m build --wheel --no-isolation
 
-      - name: Build libtorch (Windows CPU)
-        if: matrix.target_os == 'windows' && matrix.backend == 'cpu'
-        working-directory: pytorch-src
-        shell: pwsh
-        env:
-          USE_CUDA: "0"
-          USE_ROCM: "0"
-          USE_NUMPY: "1"
-          BUILD_TEST: "0"
-          MAX_JOBS: "4"
-          CMAKE_GENERATOR: "Ninja"
-        run: |
-          $pythonExe = python -c "import sys; print(sys.executable)"
-          $pythonTag = python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"
-          $env:PYTHON_EXECUTABLE = $pythonExe
-          $env:Python_EXECUTABLE = $pythonExe
-          $env:Python3_EXECUTABLE = $pythonExe
-          $env:DESIRED_PYTHON = $pythonTag
-          python tools/build_libtorch.py
-
-      - name: Build wheel from libtorch (Windows CPU)
+      - name: Build torch wheel (Windows CPU)
         if: matrix.target_os == 'windows' && matrix.backend == 'cpu'
         working-directory: pytorch-src
         shell: pwsh
@@ -720,7 +686,11 @@ jobs:
           BUILD_TEST: "0"
           MAX_JOBS: "4"
           CMAKE_GENERATOR: "Ninja"
-          TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
+          TORCH_CUDA_ARCH_LIST: "5.0;5.2;6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0+PTX"
+          USE_CUDNN: "0"
+          USE_CUSPARSELT: "0"
+          USE_FLASH_ATTENTION: "0"
+          USE_MEM_EFF_ATTENTION: "0"
         run: |
           $pythonExe = python -c "import sys; print(sys.executable)"
           $pythonTag = python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"
@@ -741,7 +711,11 @@ jobs:
           BUILD_TEST: "0"
           MAX_JOBS: "4"
           CMAKE_GENERATOR: "Ninja"
-          TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9;9.0"
+          TORCH_CUDA_ARCH_LIST: "5.0;5.2;6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0+PTX"
+          USE_CUDNN: "0"
+          USE_CUSPARSELT: "0"
+          USE_FLASH_ATTENTION: "0"
+          USE_MEM_EFF_ATTENTION: "0"
           CMAKE_FRESH: "1"
         run: |
           $pythonExe = python -c "import sys; print(sys.executable)"
@@ -990,7 +964,7 @@ jobs:
         if: matrix.backend == 'cuda'
         uses: Jimver/cuda-toolkit@v0.2.29
         with:
-          cuda: '12.4.1'
+          cuda: '12.8.0'
           method: 'network'
 
       - name: Discover CUDA home (Linux CUDA)
@@ -1263,7 +1237,7 @@ jobs:
         if: matrix.backend == 'cuda'
         uses: Jimver/cuda-toolkit@v0.2.29
         with:
-          cuda: '12.4.1'
+          cuda: '12.8.0'
           method: 'network'
 
       - name: Discover CUDA home (Linux CUDA)

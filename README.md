@@ -11,7 +11,7 @@ This repository builds `torch`, `torchvision`, and `torchaudio` from source and 
 | macOS (Intel)     | x86\_64      | macos-15-intel  |
 | macOS (Apple Silicon) | arm64   | macos-14        |
 
-Linux and Windows GitHub Actions builds are CPU-only. macOS Intel is CPU-only, and macOS Apple Silicon uses MPS (Metal Performance Shaders). CUDA 12.4 wheels are built separately with the local CUDA tooling because hosted GitHub Actions runners are not the supported CUDA build environment.
+Linux and Windows GitHub Actions builds are CPU-only. macOS Intel is CPU-only, and macOS Apple Silicon uses MPS (Metal Performance Shaders). One maximum-coverage Torch 2.11 + CUDA 12.8 wheel family is built separately with the local CUDA tooling because hosted GitHub Actions runners are not the supported CUDA build environment. It targets Maxwell through Blackwell (`5.0;5.2;6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0+PTX`). cuDNN, cuSPARSELt, Flash Attention, and memory-efficient attention are disabled so optional acceleration libraries do not narrow general CUDA tensor execution.
 
 ## Configuration
 
@@ -108,8 +108,8 @@ Useful flags:
 
 Local prerequisites:
 
-- Windows host with Python for each target version, Visual Studio Build Tools 2022, Git, CUDA 12.4, and WSL2
-- Linux WSL2 distro with matching Python versions, Git, CUDA 12.4, and the usual build toolchain
+- Windows host with Python for each target version, Visual Studio Build Tools 2022, Git, CUDA 12.8, and WSL2
+- Linux WSL2 distro with matching Python versions, Git, CUDA 12.8 at `/usr/local/cuda-12.8`, and the usual build toolchain
 - A GitHub token with `contents:write` access if you want automatic release uploads
 
 The PowerShell entry script creates per-version virtual environments for Windows and WSL2 so the local build dependencies stay isolated from your normal Python installs.

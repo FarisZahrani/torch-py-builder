@@ -16,17 +16,19 @@ class BuildWorkflowPlatformGuardsTests(unittest.TestCase):
     def test_intel_macos_explicitly_disables_mps(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 
-        for step_name in (
-            "Build libtorch (macOS x86_64 CPU)",
-            "Build wheel from libtorch (macOS x86_64 CPU)",
-        ):
-            self.assertIn('USE_MPS: "0"', _step_block(workflow, step_name))
+        step = _step_block(workflow, "Build torch wheel (macOS x86_64 CPU)")
+        self.assertIn('USE_MPS: "0"', step)
+        self.assertIn("python -m build --wheel --no-isolation", step)
+        self.assertNotIn("tools/build_libtorch.py", step)
 
-    def test_windows_wheel_build_reuses_libtorch_configuration(self) -> None:
+    def test_windows_builds_one_complete_torch_wheel(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-        step = _step_block(workflow, "Build wheel from libtorch (Windows CPU)")
+        step = _step_block(workflow, "Build torch wheel (Windows CPU)")
 
-        self.assertNotIn("CMAKE_FRESH", step)
+        self.assertIn("python -m build --wheel --no-isolation", step)
+        self.assertNotIn("tools/build_libtorch.py", step)
+        self.assertNotIn("Build libtorch (Windows CPU)", workflow)
+        self.assertNotIn("Build wheel from libtorch (Windows CPU)", workflow)
 
 
 if __name__ == "__main__":

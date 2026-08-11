@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,8 +16,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HEARTBEAT_SECONDS = 300
-LINUX_CUDA_ARCH_LIST = "5.0;6.0;7.0;7.5;8.0;8.6;8.9;9.0+PTX"
-WINDOWS_CUDA_ARCH_LIST = "7.5;8.0;8.6;8.9;9.0"
+SUPPORTED_TORCH_VERSION = "2.11.0"
+CUDA_TOOLKIT_VERSION = "12.8"
+# Favor architecture reach over specialized acceleration. CUDA 12.8 is the
+# bridge toolkit that can compile Maxwell through Blackwell targets.
+CUDA_ARCH_LIST = "5.0;5.2;6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0+PTX"
 
 
 def timestamp() -> str:
@@ -363,8 +367,24 @@ def ensure_cuda_home(target_os: str) -> str:
                 return candidate
 
     raise SystemExit(
-        "Could not determine CUDA_HOME. Install CUDA 12.4 and expose CUDA_PATH/CUDA_HOME or nvcc."
+        f"Could not determine CUDA_HOME. Install CUDA {CUDA_TOOLKIT_VERSION} and expose "
+        "CUDA_PATH/CUDA_HOME or nvcc."
     )
+
+
+def verify_cuda_toolkit(cuda_home: str) -> None:
+    nvcc_name = "nvcc.exe" if os.name == "nt" else "nvcc"
+    nvcc = Path(cuda_home) / "bin" / nvcc_name
+    if not nvcc.exists():
+        raise SystemExit(f"nvcc was not found in the selected CUDA toolkit: {nvcc}")
+    output = capture_command([str(nvcc), "--version"], cwd=REPO_ROOT)
+    match = re.search(r"release\s+([0-9]+\.[0-9]+)", output)
+    detected = match.group(1) if match else "unknown"
+    if detected != CUDA_TOOLKIT_VERSION:
+        raise SystemExit(
+            f"CUDA toolkit mismatch: expected {CUDA_TOOLKIT_VERSION}, detected {detected} "
+            f"at {cuda_home}"
+        )
 
 
 def get_pip_cmake_bin(cwd: Path) -> Path:
@@ -485,6 +505,10 @@ def build_environment(target_os: str, torch_version: str, cuda_home: str, work_r
         "PYTORCH_BUILD_NUMBER": "1",
         "USE_CUDA": "1",
         "USE_ROCM": "0",
+        "USE_CUDNN": "0",
+        "USE_CUSPARSELT": "0",
+        "USE_FLASH_ATTENTION": "0",
+        "USE_MEM_EFF_ATTENTION": "0",
         "USE_NUMPY": "1",
         "BUILD_TEST": "0",
         "CUDA_HOME": cuda_home,
@@ -500,7 +524,7 @@ def build_environment(target_os: str, torch_version: str, cuda_home: str, work_r
             {
                 "USE_MKLDNN": "1",
                 "USE_DISTRIBUTED": "0",
-                "TORCH_CUDA_ARCH_LIST": LINUX_CUDA_ARCH_LIST,
+                "TORCH_CUDA_ARCH_LIST": CUDA_ARCH_LIST,
             }
         )
         jemalloc = next(iter(Path("/usr/lib").glob("**/libjemalloc.so.2")), None)
@@ -511,7 +535,7 @@ def build_environment(target_os: str, torch_version: str, cuda_home: str, work_r
         environment.update(
             {
                 "CMAKE_GENERATOR": "Ninja",
-                "TORCH_CUDA_ARCH_LIST": WINDOWS_CUDA_ARCH_LIST,
+                "TORCH_CUDA_ARCH_LIST": CUDA_ARCH_LIST,
             }
         )
         if find_windows_libomp() is None:
@@ -578,6 +602,7 @@ def build_torch(args: argparse.Namespace, target_os: str, work_root: Path, artif
     existing_wheel = artifact_root / wheel_name
     if existing_wheel.exists():
         cuda_home = ensure_cuda_home(target_os)
+        verify_cuda_toolkit(cuda_home)
         source_dir = work_root / f"pytorch-src-v{args.torch_version}"
         if target_os == "windows" and not wheel_has_bundled_cuda_runtime(existing_wheel):
             bundle_windows_torch_wheel(
@@ -635,32 +660,12 @@ def build_torch(args: argparse.Namespace, target_os: str, work_root: Path, artif
     pip_install(["install", "-r", "requirements.txt"], cwd=source_dir, label="Install PyTorch requirements")
 
     cuda_home = ensure_cuda_home(target_os)
+    verify_cuda_toolkit(cuda_home)
     environment = build_environment(target_os, args.torch_version, cuda_home, source_dir)
 
     remove_path(source_dir / "dist")
 
     show_sccache_stats(work_root)
-    if target_os == "windows" and environment.get("USE_OPENMP") == "0":
-        cmake_cache = source_dir / "build" / "CMakeCache.txt"
-        ninja_build = source_dir / "build" / "build.ninja"
-        if cmake_cache.exists() or ninja_build.exists():
-            log("Clearing CMake cache before libtorch build (OpenMP disabled)")
-            remove_path(cmake_cache)
-            remove_path(ninja_build)
-    run_command(
-        [sys.executable, "tools/build_libtorch.py"],
-        cwd=source_dir,
-        env=environment,
-        label=f"Build libtorch ({target_os})",
-        heartbeat_paths=[source_dir / "build", source_dir / "dist"],
-    )
-    # build_libtorch configures CMake with BUILD_PYTHON=OFF; clear cache so wheel build can enable it.
-    cmake_cache = source_dir / "build" / "CMakeCache.txt"
-    ninja_build = source_dir / "build" / "build.ninja"
-    if cmake_cache.exists() or ninja_build.exists():
-        log(f"Clearing CMake cache before wheel build ({target_os})")
-        remove_path(cmake_cache)
-        remove_path(ninja_build)
     run_command(
         [sys.executable, "-m", "build", "--wheel", "--no-isolation"],
         cwd=source_dir,
@@ -865,6 +870,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.torch_version != SUPPORTED_TORCH_VERSION:
+        raise SystemExit(
+            f"The maximum-coverage CUDA builder is pinned to torch "
+            f"{SUPPORTED_TORCH_VERSION}; received {args.torch_version}."
+        )
     target_os = current_target_os()
     if args.target_os != target_os:
         raise SystemExit(f"This script is running on {target_os}, not {args.target_os}.")

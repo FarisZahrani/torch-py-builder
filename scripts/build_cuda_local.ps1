@@ -312,8 +312,8 @@ Package Layout
 - Local CUDA assets can be appended by this local build script.
 
 Platforms & Backends
-- Linux x86_64 | CUDA 12.4
-- Windows x86_64 | CUDA 12.4
+- Linux x86_64 | Torch 2.11 + CUDA 12.8 (maximum architecture coverage)
+- Windows x86_64 | Torch 2.11 + CUDA 12.8 (maximum architecture coverage)
 
 Notes
 - These wheels preserve the normal package split: install torch, torchvision, and torchaudio separately as needed.
@@ -582,7 +582,7 @@ if (-not $UploadOnly -and $TargetOs -in @('both', 'linux')) {
 
         $commandText = @(
             'set -euo pipefail',
-            'export CUDA_HOME=/usr/local/cuda',
+            'export CUDA_HOME=/usr/local/cuda-12.8',
             'export PATH="$CUDA_HOME/bin:$PATH"',
             $workRootLine,
             'mkdir -p "$WSL_WORK_ROOT" "$WSL_WORK_ROOT/venvs" "$WSL_WORK_ROOT/w"',
