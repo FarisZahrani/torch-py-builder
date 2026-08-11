@@ -13,6 +13,26 @@ def _step_block(workflow: str, step_name: str) -> str:
 
 
 class BuildWorkflowPlatformGuardsTests(unittest.TestCase):
+    def test_every_torch_build_explicitly_disables_native_cpu_tuning(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        build_steps = (
+            "Build libtorch (Linux CPU)",
+            "Build wheel from libtorch (Linux CPU)",
+            "Build libtorch (Linux CUDA)",
+            "Build wheel from libtorch (Linux CUDA)",
+            "Build libtorch (macOS arm64 MPS)",
+            "Build wheel from libtorch (macOS arm64 MPS)",
+            "Build torch wheel (macOS x86_64 CPU)",
+            "Build torch wheel (Windows CPU)",
+            "Build libtorch (Windows CUDA)",
+            "Build wheel from libtorch (Windows CUDA)",
+        )
+
+        for step_name in build_steps:
+            with self.subTest(step=step_name):
+                step = _step_block(workflow, step_name)
+                self.assertIn('USE_NATIVE_ARCH: "0"', step)
+
     def test_intel_macos_explicitly_disables_mps(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 
