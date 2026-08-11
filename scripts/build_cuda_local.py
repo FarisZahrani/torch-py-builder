@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -16,7 +17,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HEARTBEAT_SECONDS = 300
-SUPPORTED_TORCH_VERSION = "2.11.0"
+SUPPORTED_TORCH_VERSION = json.loads(
+    (REPO_ROOT / "config" / "build_matrix.json").read_text(encoding="utf-8")
+)["torch_version"]
 CUDA_TOOLKIT_VERSION = "12.8"
 # Favor architecture reach over specialized acceleration. CUDA 12.8 is the
 # bridge toolkit that can compile Maxwell through Blackwell targets.

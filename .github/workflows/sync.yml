@@ -38,7 +38,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python scripts/resolve_latest_torch.py --output resolved.json
+          PINNED_TORCH_VERSION=$(jq -r '.torch_version' config/build_matrix.json)
+          python scripts/resolve_latest_torch.py \
+            --version-override "${PINNED_TORCH_VERSION}" \
+            --output resolved.json
           cat resolved.json
 
       - name: Verify companion source tags exist
@@ -88,7 +91,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          PAYLOAD='{"ref":"${{ github.ref_name }}","inputs":{"force_rebuild":"false"}}'
+          PAYLOAD='{"ref":"${{ github.ref_name }}","inputs":{"force_rebuild":"false","torch_version_override":"${{ steps.check.outputs.torch_version }}"}}'
 
           HTTP_STATUS=$(curl -sS -L \
             -X POST \

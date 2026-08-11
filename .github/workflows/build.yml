@@ -88,13 +88,11 @@ jobs:
           TORCH_VERSION_OVERRIDE: ${{ github.event.inputs.torch_version_override || '' }}
         run: |
           set -euo pipefail
-          EXTRA_ARGS=()
-          if [ -n "${TORCH_VERSION_OVERRIDE}" ]; then
-            EXTRA_ARGS+=(--version-override "${TORCH_VERSION_OVERRIDE}")
-          fi
+          PINNED_TORCH_VERSION=$(jq -r '.torch_version' config/build_matrix.json)
+          RESOLVED_TORCH_VERSION=${TORCH_VERSION_OVERRIDE:-$PINNED_TORCH_VERSION}
           python scripts/resolve_latest_torch.py \
             --output resolved.json \
-            "${EXTRA_ARGS[@]}"
+            --version-override "${RESOLVED_TORCH_VERSION}"
           cat resolved.json
 
       - id: plan

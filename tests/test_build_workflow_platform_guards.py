@@ -3,6 +3,8 @@ import unittest
 
 
 WORKFLOW_PATH = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "build.yml"
+SYNC_WORKFLOW_PATH = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "sync.yml"
+MATRIX_PATH = Path(__file__).resolve().parents[1] / "config" / "build_matrix.json"
 
 
 def _step_block(workflow: str, step_name: str) -> str:
@@ -13,6 +15,18 @@ def _step_block(workflow: str, step_name: str) -> str:
 
 
 class BuildWorkflowPlatformGuardsTests(unittest.TestCase):
+    def test_production_workflows_use_the_shared_torch_pin(self) -> None:
+        import json
+
+        matrix = json.loads(MATRIX_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(matrix["torch_version"], "2.11.0")
+
+        build_workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        sync_workflow = SYNC_WORKFLOW_PATH.read_text(encoding="utf-8")
+        for workflow in (build_workflow, sync_workflow):
+            self.assertIn("jq -r '.torch_version' config/build_matrix.json", workflow)
+            self.assertIn('--version-override "${', workflow)
+
     def test_every_torch_build_explicitly_disables_native_cpu_tuning(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         build_steps = (

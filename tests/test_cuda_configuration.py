@@ -20,6 +20,13 @@ def test_single_cuda_toolkit_is_current_default() -> None:
     assert CUDA_TOOLKIT_VERSION == "12.8"
 
 
+def test_cuda_builder_reads_the_shared_torch_pin() -> None:
+    import json
+
+    matrix = json.loads((ROOT / "config" / "build_matrix.json").read_text(encoding="utf-8"))
+    assert SUPPORTED_TORCH_VERSION == matrix["torch_version"]
+
+
 def test_cuda_architecture_list_covers_turing_through_blackwell() -> None:
     assert CUDA_ARCH_LIST == "5.0;5.2;6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0+PTX"
 

@@ -486,10 +486,15 @@ $latestState = Get-Content -Path (Join-Path $repoRoot 'release-state\latest.json
 $buildMatrix = Get-Content -Path (Join-Path $repoRoot 'config\build_matrix.json') -Raw | ConvertFrom-Json
 
 if (-not $TorchVersion) {
-    $TorchVersion = $latestState.torch_version
+    $TorchVersion = $buildMatrix.torch_version
 }
 if (-not $ReleaseTag) {
-    $ReleaseTag = $latestState.release_tag
+    if ($latestState.torch_version -eq $TorchVersion) {
+        $ReleaseTag = $latestState.release_tag
+    }
+    else {
+        $ReleaseTag = "torch-$TorchVersion"
+    }
 }
 if (-not $Repository) {
     $Repository = $latestState.workflow_run.repository
