@@ -734,6 +734,18 @@ jobs:
           $env:DESIRED_PYTHON = $pythonTag
           python -m build --wheel --no-isolation
 
+      - name: Set explicit macOS wheel architecture tag
+        if: matrix.target_os == 'macos'
+        shell: bash
+        working-directory: pytorch-src
+        run: |
+          if [ "${{ matrix.target_arch }}" = "arm64" ]; then
+            PLATFORM_TAG="macosx_11_0_arm64"
+          else
+            PLATFORM_TAG="macosx_10_15_x86_64"
+          fi
+          python -m wheel tags --remove --platform-tag "$PLATFORM_TAG" dist/*.whl
+
       - id: collect-built-wheel
         name: Collect built wheel
         shell: bash
@@ -1137,6 +1149,18 @@ jobs:
           }
           python setup.py bdist_wheel
 
+      - name: Set explicit macOS wheel architecture tag
+        if: matrix.target_os == 'macos'
+        shell: bash
+        working-directory: vision-src
+        run: |
+          if [ "${{ matrix.target_arch }}" = "arm64" ]; then
+            PLATFORM_TAG="macosx_11_0_arm64"
+          else
+            PLATFORM_TAG="macosx_10_15_x86_64"
+          fi
+          python -m wheel tags --remove --platform-tag "$PLATFORM_TAG" dist/*.whl
+
       - name: Collect built wheel
         shell: bash
         run: |
@@ -1368,6 +1392,14 @@ jobs:
           if [ "${{ matrix.backend }}" = "cuda" ]; then
             export USE_CUDA=1
           fi
+          if [ "${{ matrix.target_os }}" = "macos" ] && [ "${{ matrix.target_arch }}" = "arm64" ]; then
+            export MACOSX_DEPLOYMENT_TARGET=11.0
+            export CMAKE_OSX_ARCHITECTURES=arm64
+          fi
+          if [ "${{ matrix.target_os }}" = "macos" ] && [ "${{ matrix.target_arch }}" = "x86_64" ]; then
+            export MACOSX_DEPLOYMENT_TARGET=10.15
+            export CMAKE_OSX_ARCHITECTURES=x86_64
+          fi
           python setup.py bdist_wheel
 
       - name: Build torchaudio wheel (Windows)
@@ -1387,6 +1419,18 @@ jobs:
             }
           }
           python setup.py bdist_wheel
+
+      - name: Set explicit macOS wheel architecture tag
+        if: matrix.target_os == 'macos'
+        shell: bash
+        working-directory: audio-src
+        run: |
+          if [ "${{ matrix.target_arch }}" = "arm64" ]; then
+            PLATFORM_TAG="macosx_11_0_arm64"
+          else
+            PLATFORM_TAG="macosx_10_15_x86_64"
+          fi
+          python -m wheel tags --remove --platform-tag "$PLATFORM_TAG" dist/*.whl
 
       - name: Collect built wheel
         shell: bash

@@ -15,9 +15,9 @@ def platform_substrings(target_os: str, target_arch: str) -> list[str]:
     if target_os == "windows" and target_arch == "x86_64":
         return ["win_amd64"]
     if target_os == "macos" and target_arch == "x86_64":
-        return ["macosx_10_15", "macosx_10_13"]
+        return ["_x86_64"]
     if target_os == "macos" and target_arch == "arm64":
-        return ["macosx_11_0", "macosx_12_0", "macosx_13_0", "macosx_14_0", "_arm64"]
+        return ["_arm64"]
     raise ValueError(f"Unsupported platform: {target_os}/{target_arch}")
 
 
