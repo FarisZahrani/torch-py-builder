@@ -104,6 +104,87 @@ def run_command(
     log(f"Completed {label}")
 
 
+def ensure_pip_available(cwd: Path) -> None:
+    """Bootstrap pip when the selected build interpreter was created without it."""
+    check = subprocess.run(
+        [sys.executable, "-m", "pip", "--version"],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if check.returncode == 0:
+        return
+
+    log("pip is unavailable in the selected Python; bootstrapping with ensurepip")
+    try:
+        run_command(
+            [sys.executable, "-m", "ensurepip", "--upgrade"],
+            cwd=cwd,
+            label="Bootstrap pip",
+        )
+        run_command(
+            [sys.executable, "-m", "pip", "--version"],
+            cwd=cwd,
+            label="Verify pip",
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "The selected Python environment has no pip and ensurepip could not bootstrap it. "
+            "Install pip for that interpreter, then rerun the CUDA builder."
+        ) from exc
+
+
+def git_submodule_environment(target_os: str) -> dict[str, str] | None:
+    if target_os != "windows":
+        return None
+    # Apply core.longpaths to this command and every nested Git process without
+    # permanently modifying the user's global Git configuration.
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.longpaths",
+        "GIT_CONFIG_VALUE_0": "true",
+    }
+
+
+def update_pytorch_submodules(source_dir: Path, target_os: str, attempts: int = 3) -> None:
+    environment = git_submodule_environment(target_os)
+    run_command(
+        ["git", "config", "core.longpaths", "true"],
+        cwd=source_dir,
+        env=environment,
+        label="Enable Git long paths",
+    )
+
+    last_error: RuntimeError | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            run_command(
+                ["git", "submodule", "sync", "--recursive"],
+                cwd=source_dir,
+                env=environment,
+                label=f"Sync PyTorch submodules (attempt {attempt}/{attempts})",
+            )
+            run_command(
+                ["git", "submodule", "update", "--init", "--recursive", "--depth", "1", "--jobs", "4"],
+                cwd=source_dir,
+                env=environment,
+                label=f"Update PyTorch submodules (attempt {attempt}/{attempts})",
+            )
+            return
+        except RuntimeError as exc:
+            last_error = exc
+            if attempt == attempts:
+                break
+            delay = 5 * attempt
+            log(f"Submodule update failed; retrying in {delay} seconds")
+            time.sleep(delay)
+
+    raise RuntimeError(
+        f"Update PyTorch submodules failed after {attempts} attempts"
+    ) from last_error
+
+
 def dll_load_preamble() -> str:
     return (
         "import os\n"
@@ -643,16 +724,7 @@ def build_torch(args: argparse.Namespace, target_os: str, work_root: Path, artif
     source_dir = work_root / f"pytorch-src-v{args.torch_version}"
     ensure_checkout(source_dir, "https://github.com/pytorch/pytorch", f"v{args.torch_version}")
 
-    run_command(
-        ["git", "submodule", "sync", "--recursive"],
-        cwd=source_dir,
-        label="Sync PyTorch submodules",
-    )
-    run_command(
-        ["git", "submodule", "update", "--init", "--recursive", "--depth", "1", "--jobs", "4"],
-        cwd=source_dir,
-        label="Update PyTorch submodules",
-    )
+    update_pytorch_submodules(source_dir, target_os)
 
     pip_install(["install", "--upgrade", "pip"], cwd=source_dir, label="Upgrade pip")
     pip_install(
@@ -888,6 +960,7 @@ def main() -> None:
     artifact_root = Path(args.artifact_root).expanduser().resolve()
     work_root.mkdir(parents=True, exist_ok=True)
     artifact_root.mkdir(parents=True, exist_ok=True)
+    ensure_pip_available(REPO_ROOT)
 
     if args.bootstrap_system_deps:
         bootstrap_system_dependencies(target_os, work_root)
