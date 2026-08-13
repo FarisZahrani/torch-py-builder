@@ -24,6 +24,14 @@ CUDA_TOOLKIT_VERSION = "12.8"
 # Favor architecture reach over specialized acceleration. CUDA 12.8 is the
 # bridge toolkit that can compile Maxwell through Blackwell targets.
 CUDA_ARCH_LIST = "5.0;5.2;6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0+PTX"
+CUDA_REQUIRED_LIBRARIES = {
+    "cuFFT": "libcufft.so",
+    "cuRAND": "libcurand.so",
+    "cuSPARSE": "libcusparse.so",
+    "cuSOLVER": "libcusolver.so",
+    "cuFile": "libcufile.so",
+}
+CUDA_REQUIRED_HEADERS = {"NVML": "nvml.h"}
 
 
 def timestamp() -> str:
@@ -469,6 +477,45 @@ def verify_cuda_toolkit(cuda_home: str) -> None:
             f"CUDA toolkit mismatch: expected {CUDA_TOOLKIT_VERSION}, detected {detected} "
             f"at {cuda_home}"
         )
+    verify_cuda_libraries(cuda_home)
+
+
+def verify_cuda_libraries(cuda_home: str) -> None:
+    """Fail before configuration when PyTorch's CUDA libraries are missing."""
+    root = Path(cuda_home)
+    library_dirs = (
+        root / "targets" / "x86_64-linux" / "lib",
+        root / "lib64",
+        root / "lib",
+    )
+    missing = [
+        component
+        for component, filename in CUDA_REQUIRED_LIBRARIES.items()
+        if not any(
+            any(directory.glob(f"{filename}*"))
+            for directory in library_dirs
+        )
+    ]
+    include_dirs = (
+        root / "targets" / "x86_64-linux" / "include",
+        root / "include",
+    )
+    missing_headers = [
+        component
+        for component, filename in CUDA_REQUIRED_HEADERS.items()
+        if not any((directory / filename).is_file() for directory in include_dirs)
+    ]
+    missing.extend(missing_headers)
+    if not missing:
+        return
+
+    missing_names = ", ".join(missing)
+    raise SystemExit(
+        f"CUDA {CUDA_TOOLKIT_VERSION} at {cuda_home} is incomplete; missing development "
+        f"libraries: {missing_names}. Install the complete cuda-toolkit-12-8 package or "
+        "the matching CUDA development packages before building PyTorch. Only omit cuFile "
+        "by explicitly setting USE_CUFILE=0; the other CUDA libraries are required."
+    )
 
 
 def get_pip_cmake_bin(cwd: Path) -> Path:
@@ -567,20 +614,53 @@ def pip_install(arguments: list[str], *, cwd: Path, env: dict[str, str] | None =
 
 
 def max_parallel_jobs(target_os: str) -> int:
+    """Select a build parallelism capped at 80% CPU and 80% RAM.
+
+    Large PyTorch CUDA/CUTLASS translation units can use several GiB each,
+    so CPU-only parallelism is not a safe bound on Linux.
+    """
     cpu_count = os.cpu_count() or 4
     cpu_target = max(1, int(cpu_count * 0.8))
-    if target_os != "linux":
-        return cpu_target
-
     try:
-        meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
-        mem_kb = int(next(line for line in meminfo.splitlines() if line.startswith("MemTotal:")).split()[1])
-        mem_gb = mem_kb / (1024 * 1024)
-        # Budget ~2 GiB per parallel C++/CUDA compile to avoid WSL OOM kills.
-        mem_cap = max(1, int(mem_gb / 2))
+        if target_os == "linux":
+            meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
+            available_kb = int(
+                next(
+                    line for line in meminfo.splitlines() if line.startswith("MemAvailable:")
+                ).split()[1]
+            )
+        elif target_os == "windows":
+            import ctypes
+
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = MemoryStatus()
+            status.dwLength = ctypes.sizeof(MemoryStatus)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                raise OSError("GlobalMemoryStatusEx failed")
+            available_kb = int(status.ullAvailPhys / 1024)
+        else:
+            return cpu_target
+
+        # Keep 20% RAM free and budget 4 GiB per concurrent C++/CUDA compile.
+        # PyTorch's CUTLASS/MSLK files are substantially larger than ordinary
+        # C++ translation units and can otherwise trigger OOM kills.
+        usable_gb = (available_kb / (1024 * 1024)) * 0.8
+        mem_cap = max(1, int(usable_gb / 4))
         return max(1, min(cpu_target, mem_cap))
-    except (OSError, StopIteration, ValueError):
-        return max(1, min(cpu_target, 6))
+    except (AttributeError, OSError, StopIteration, ValueError):
+        return max(1, min(cpu_target, 4))
 
 
 def build_environment(target_os: str, torch_version: str, cuda_home: str, work_root: Path) -> dict[str, str]:

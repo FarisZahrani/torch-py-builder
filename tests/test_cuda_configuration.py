@@ -15,6 +15,7 @@ from build_cuda_local import (  # noqa: E402
     ensure_pip_available,
     git_submodule_environment,
     update_pytorch_submodules,
+    verify_cuda_libraries,
 )
 
 
@@ -69,6 +70,24 @@ def test_missing_pip_is_bootstrapped_with_ensurepip(monkeypatch, tmp_path) -> No
 
     assert commands[0][2:] == ["ensurepip", "--upgrade"]
     assert commands[1][2:] == ["pip", "--version"]
+
+
+def test_cuda_preflight_rejects_incomplete_toolkit(tmp_path) -> None:
+    library_dir = tmp_path / "targets" / "x86_64-linux" / "lib"
+    library_dir.mkdir(parents=True)
+    (library_dir / "libcufft.so.12").touch()
+
+    try:
+        verify_cuda_libraries(str(tmp_path))
+    except SystemExit as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("incomplete CUDA toolkit was accepted")
+
+    assert "cuRAND" in message
+    assert "cuSPARSE" in message
+    assert "cuSOLVER" in message
+    assert "cuFile" in message
 
 
 def test_windows_submodule_git_config_reaches_nested_processes() -> None:

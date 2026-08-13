@@ -10,3 +10,4 @@ __pycache__/
 .env.*
 !.env.example
 *.deb
+.cuda-12.8
